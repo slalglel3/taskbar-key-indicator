@@ -10,4 +10,5 @@ public:
     static void LogA(const char* format, ...);
     static std::wstring GetLogPath();
     static void OpenLogFile();
+    static void Close();
 };

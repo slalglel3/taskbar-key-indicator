@@ -96,7 +96,9 @@ Application::~Application() {
         CloseHandle(m_hMutex);
         m_hMutex = NULL;
     }
+    Logger::Close();
 }
+
 
 HICON Application::CreateLedIcon(COLORREF color) {
     HDC hdcScreen = GetDC(NULL);
@@ -109,12 +111,14 @@ HICON Application::CreateLedIcon(COLORREF color) {
     HBITMAP hOldMask = (HBITMAP)SelectObject(hdcMask, hMask);
 
     RECT rc = { 0, 0, 16, 16 };
-    FillRect(hdcMem, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-    FillRect(hdcMask, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+    HBRUSH hBrBlackStock = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    HBRUSH hBrWhiteStock = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(hdcMem, &rc, hBrBlackStock);
+    FillRect(hdcMask, &rc, hBrWhiteStock);
 
     HBRUSH hBrColor = CreateSolidBrush(color);
-    SelectObject(hdcMem, hBrColor);
-    SelectObject(hdcMask, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    HBRUSH hOldBrMem = (HBRUSH)SelectObject(hdcMem, hBrColor);
+    HBRUSH hOldBrMask = (HBRUSH)SelectObject(hdcMask, hBrBlackStock);
 
     Ellipse(hdcMem, 2, 2, 14, 14);
     Ellipse(hdcMask, 2, 2, 14, 14);
@@ -124,8 +128,12 @@ HICON Application::CreateLedIcon(COLORREF color) {
     SelectObject(hdcMem, hBrWhite);
     Ellipse(hdcMem, 4, 4, 8, 8);
 
+    // [중요] 원래 브러시 및 비트맵으로 완벽 복원 후 DC 삭제 (GDI 누수 원천 차단)
+    SelectObject(hdcMem, hOldBrMem);
+    SelectObject(hdcMask, hOldBrMask);
     SelectObject(hdcMem, hOldBmp);
     SelectObject(hdcMask, hOldMask);
+
     DeleteDC(hdcMem);
     DeleteDC(hdcMask);
     ReleaseDC(NULL, hdcScreen);
@@ -378,6 +386,17 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     }
 
     switch (msg) {
+    case WM_QUERYENDSESSION:
+        Logger::Log(L"[WndProc] WM_QUERYENDSESSION received. Allowing clean OS shutdown.");
+        return TRUE; // 시스템 종료 동의
+
+    case WM_ENDSESSION:
+        if (wParam == TRUE) {
+            Logger::Log(L"[WndProc] WM_ENDSESSION received (EndSession=TRUE). Initiating clean exit.");
+            PostQuitMessage(0); // 셧다운 차단 방지 및 클린 종료
+        }
+        return 0;
+
     case WM_DEVICECHANGE:
         Logger::Log(L"[WndProc] WM_DEVICECHANGE intercepted by Top-level Window.");
         g_app->m_deviceWatcher.OnDeviceChange(wParam, lParam);
@@ -484,7 +503,12 @@ int Application::Run(HINSTANCE hInstance) {
     }
 
     MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
+    BOOL bRet;
+    while ((bRet = GetMessageW(&msg, NULL, 0, 0)) != 0) {
+        if (bRet == -1) {
+            Logger::Log(L"[App] GetMessageW returned -1 (Error). Terminating message loop.");
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
