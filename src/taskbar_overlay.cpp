@@ -1,7 +1,9 @@
 #include "taskbar_overlay.h"
+#include "logger.h"
 #include <algorithm>
 
 static const wchar_t* OVERLAY_CLASS_NAME = L"TaskbarLedOverlayClass";
+static const UINT_PTR TIMER_TEST_RESTORE = 2001;
 
 static COLORREF BlendColor(COLORREF c1, COLORREF c2, float t) {
     BYTE r = (BYTE)(GetRValue(c1) * (1.0f - t) + GetRValue(c2) * t);
@@ -23,6 +25,7 @@ TaskbarOverlayManager::TaskbarOverlayManager()
     , m_keyboardConnected(true)
     , m_currentColor(RGB(255, 45, 85))
     , m_shouldShow(false)
+    , m_isTesting(false)
     , m_thickness(3)
 {
 }
@@ -39,9 +42,17 @@ bool TaskbarOverlayManager::Initialize(HINSTANCE hInstance) {
     wc.hInstance = m_hInstance;
     wc.lpszClassName = OVERLAY_CLASS_NAME;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = NULL; // 직접 더블 버퍼링 드로잉
+    wc.hbrBackground = NULL;
 
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_CLASS_ALREADY_EXISTS) {
+            Logger::Log(L"[Overlay] Failed to register overlay window class. Error: %lu", err);
+            return false;
+        }
+    }
+
+    Logger::Log(L"[Overlay] Overlay class registered successfully.");
     return true;
 }
 
@@ -76,6 +87,8 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
     HWND hPrimaryTray = FindWindowW(L"Shell_TrayWnd", NULL);
     if (hPrimaryTray) {
         allTrays.push_back(hPrimaryTray);
+    } else {
+        Logger::Log(L"[Overlay] Shell_TrayWnd not found! Taskbar handle is NULL.");
     }
 
     // 보조 모니터 작업표시줄들
@@ -84,6 +97,9 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
     for (HWND hSec : data.trayHwnds) {
         allTrays.push_back(hSec);
     }
+
+    Logger::Log(L"[Overlay] Found %zu taskbar window(s) (Primary: %s, Secondaries: %zu)",
+        allTrays.size(), hPrimaryTray ? L"Yes" : L"No", data.trayHwnds.size());
 
     // 불필요한 기존 오버레이 정리
     std::vector<OverlayWindowInfo> validOverlays;
@@ -115,11 +131,11 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
             }
         }
         if (!exists) {
-            // WS_EX_TRANSPARENT: 모든 마우스 클릭이 100% 아래의 작업표시줄로 통과!
-            // WS_EX_TOOLWINDOW: 작업표시줄이나 Alt+Tab에 표시되지 않음
-            // WS_EX_TOPMOST: 최상위 유지
-            // WS_EX_NOACTIVATE: 활성화 포커스 뺏지 않음
-            DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED;
+            // WS_EX_TRANSPARENT: 클릭 100% 하위 통과
+            // WS_EX_TOOLWINDOW: 작업표시줄/Alt+Tab 제외
+            // WS_EX_TOPMOST: 최상위 Z-order
+            // WS_EX_NOACTIVATE: 포커스 빼앗지 않음
+            DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
             DWORD style = WS_POPUP;
 
             HWND hOverlay = CreateWindowExW(
@@ -132,13 +148,15 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
             );
 
             if (hOverlay) {
-                // 불투명도 255 (단색 더블 버퍼링 렌더링)
-                SetLayeredWindowAttributes(hOverlay, 0, 255, LWA_ALPHA);
+                SetWindowLongPtrW(hOverlay, GWLP_USERDATA, (LONG_PTR)this);
                 OverlayWindowInfo info;
                 info.hOverlay = hOverlay;
                 info.hTargetTray = hTray;
                 info.isPrimary = (hTray == hPrimaryTray);
                 m_overlays.push_back(info);
+                Logger::Log(L"[Overlay] Created overlay HWND: %p for Tray: %p", hOverlay, hTray);
+            } else {
+                Logger::Log(L"[Overlay] Failed to create overlay window! Error: %lu", GetLastError());
             }
         }
     }
@@ -147,34 +165,36 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
 }
 
 void TaskbarOverlayManager::UpdatePositions() {
+    bool visible = m_shouldShow || m_isTesting;
+
     for (auto& info : m_overlays) {
         if (!info.hTargetTray || !IsWindow(info.hTargetTray)) continue;
 
         RECT rcTray;
-        if (!GetWindowRect(info.hTargetTray, &rcTray)) continue;
+        if (!GetWindowRect(info.hTargetTray, &rcTray)) {
+            Logger::Log(L"[Overlay] Failed to GetWindowRect for Tray %p", info.hTargetTray);
+            continue;
+        }
 
         int trayWidth = rcTray.right - rcTray.left;
         int trayHeight = rcTray.bottom - rcTray.top;
 
-        // 작업표시줄 위치(하단, 상단, 좌측, 우측) 자동 판별
         int x = rcTray.left;
         int y = rcTray.top;
         int w = trayWidth;
         int h = m_thickness;
 
-        // 수평 작업표시줄(대다수 윈도우 기본) vs 수직 작업표시줄
         if (trayWidth >= trayHeight) {
             // 가로형 작업표시줄
-            // 화면 상단에 붙어있는 경우 vs 하단에 붙어있는 경우
             HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
             MONITORINFO mi = { sizeof(MONITORINFO) };
             GetMonitorInfoW(hMon, &mi);
 
-            if (rcTray.top <= mi.rcMonitor.top + 5) {
-                // 작업표시줄이 화면 맨 위에 위치함 -> LED 바는 작업표시줄 하단 테두리에 배치
+            if (rcTray.top <= mi.rcMonitor.top + 10) {
+                // 작업표시줄이 상단인 경우 -> 하단 테두리에 배치
                 y = rcTray.bottom - m_thickness;
             } else {
-                // 작업표시줄이 화면 맨 아래에 위치함 -> LED 바는 작업표시줄 상단 테두리에 배치!
+                // 작업표시줄이 하단인 경우 -> 상단 테두리에 배치
                 y = rcTray.top;
             }
             w = trayWidth;
@@ -185,26 +205,29 @@ void TaskbarOverlayManager::UpdatePositions() {
             MONITORINFO mi = { sizeof(MONITORINFO) };
             GetMonitorInfoW(hMon, &mi);
 
-            if (rcTray.left <= mi.rcMonitor.left + 5) {
-                // 좌측 작업표시줄 -> 우측 테두리에 배치
+            if (rcTray.left <= mi.rcMonitor.left + 10) {
                 x = rcTray.right - m_thickness;
             } else {
-                // 우측 작업표시줄 -> 좌측 테두리에 배치
                 x = rcTray.left;
             }
             w = m_thickness;
             h = trayHeight;
         }
 
+        Logger::Log(L"[Overlay] Pos: x=%d, y=%d, w=%d, h=%d, Visible=%s (Tray: %d,%d - %d,%d)",
+            x, y, w, h, visible ? L"TRUE" : L"FALSE",
+            rcTray.left, rcTray.top, rcTray.right, rcTray.bottom);
+
         SetWindowPos(
             info.hOverlay,
             HWND_TOPMOST,
             x, y, w, h,
-            SWP_NOACTIVATE | (m_shouldShow ? SWP_SHOWWINDOW : SWP_HIDEWINDOW)
+            SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW)
         );
 
-        if (m_shouldShow) {
-            InvalidateRect(info.hOverlay, NULL, FALSE);
+        if (visible) {
+            InvalidateRect(info.hOverlay, NULL, TRUE);
+            UpdateWindow(info.hOverlay);
         }
     }
 }
@@ -218,8 +241,14 @@ void TaskbarOverlayManager::SetState(bool keyboardConnected, COLORREF disconnect
         m_shouldShow = showWhenConnected;
     } else {
         m_currentColor = disconnectedColor;
-        m_shouldShow = true; // 유선 분리 시에는 항상 선명한 LED 바 점등!
+        m_shouldShow = true;
     }
+
+    Logger::Log(L"[Overlay] SetState -> Connected: %s, Color: #%02X%02X%02X, Show: %s, Thick: %dpx",
+        m_keyboardConnected ? L"YES" : L"NO",
+        GetRValue(m_currentColor), GetGValue(m_currentColor), GetBValue(m_currentColor),
+        m_shouldShow ? L"YES" : L"NO",
+        m_thickness);
 
     CreateOrUpdateOverlays();
 }
@@ -229,20 +258,35 @@ void TaskbarOverlayManager::SetThickness(int thickness) {
     UpdatePositions();
 }
 
+void TaskbarOverlayManager::SetColor(COLORREF color) {
+    m_currentColor = color;
+    for (auto& info : m_overlays) {
+        if (info.hOverlay && IsWindow(info.hOverlay)) {
+            InvalidateRect(info.hOverlay, NULL, TRUE);
+        }
+    }
+}
+
+void TaskbarOverlayManager::ForceShowTest(int durationMs) {
+    Logger::Log(L"[Overlay] ForceShowTest initiated for %d ms", durationMs);
+    m_isTesting = true;
+    UpdatePositions();
+
+    if (!m_overlays.empty() && m_overlays[0].hOverlay) {
+        SetTimer(m_overlays[0].hOverlay, TIMER_TEST_RESTORE, durationMs, NULL);
+    }
+}
+
 void TaskbarOverlayManager::DrawNeonLedBar(HDC hdc, int width, int height, COLORREF baseColor, bool isHorizontal) {
-    // 세련된 하드웨어 게이밍 LED 스트립 / 앰비언트 네온 효과:
-    // 중심 코어는 고휘도(White Tinted), 가장자리는 은은한 글로우로 렌더링
     if (isHorizontal) {
         for (int y = 0; y < height; ++y) {
-            float norm = (float)y / (float)(height > 1 ? height - 1 : 1); // 0.0 ~ 1.0
-            // 상단 1px(또는 0번 라인)은 가장 밝은 네온 코어, 아래로 갈수록 본연의 색상과 부드러운 섀도우
             COLORREF lineCol;
             if (y == 0) {
-                lineCol = Lighten(baseColor, 0.45f); // 중심 코어 하이라이트 (눈부신 네온 라인)
+                lineCol = Lighten(baseColor, 0.50f); // 최상단 밝은 네온 코어
             } else if (y == 1) {
-                lineCol = Lighten(baseColor, 0.15f); // 메인 발광 컬러
+                lineCol = Lighten(baseColor, 0.20f); // 중간 발광 라인
             } else if (y == height - 1) {
-                lineCol = Darken(baseColor, 0.25f);  // 작업표시줄과 자연스럽게 녹아드는 글로우
+                lineCol = Darken(baseColor, 0.20f);  // 하단 소프트 섀도우
             } else {
                 lineCol = baseColor;
             }
@@ -256,11 +300,11 @@ void TaskbarOverlayManager::DrawNeonLedBar(HDC hdc, int width, int height, COLOR
         for (int x = 0; x < width; ++x) {
             COLORREF lineCol;
             if (x == 0) {
-                lineCol = Lighten(baseColor, 0.45f);
+                lineCol = Lighten(baseColor, 0.50f);
             } else if (x == 1) {
-                lineCol = Lighten(baseColor, 0.15f);
+                lineCol = Lighten(baseColor, 0.20f);
             } else if (x == width - 1) {
-                lineCol = Darken(baseColor, 0.25f);
+                lineCol = Darken(baseColor, 0.20f);
             } else {
                 lineCol = baseColor;
             }
@@ -274,17 +318,19 @@ void TaskbarOverlayManager::DrawNeonLedBar(HDC hdc, int width, int height, COLOR
 }
 
 LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static TaskbarOverlayManager* s_mgr = nullptr;
-
-    if (msg == WM_CREATE) {
-        CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
-        if (cs && cs->lpCreateParams) {
-            s_mgr = (TaskbarOverlayManager*)cs->lpCreateParams;
-        }
-        return 0;
-    }
+    TaskbarOverlayManager* pThis = (TaskbarOverlayManager*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
     switch (msg) {
+    case WM_TIMER:
+        if (wParam == TIMER_TEST_RESTORE && pThis) {
+            KillTimer(hwnd, TIMER_TEST_RESTORE);
+            pThis->m_isTesting = false;
+            Logger::Log(L"[Overlay] ForceShowTest ended. Restoring original state.");
+            pThis->UpdatePositions();
+            return 0;
+        }
+        break;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -294,29 +340,32 @@ LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wPar
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
 
-        // 더블 버퍼링으로 깜빡임 0%
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
-        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+        if (w > 0 && h > 0) {
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
 
-        COLORREF color = s_mgr ? s_mgr->m_currentColor : RGB(255, 45, 85);
-        bool isHorizontal = (w >= h);
-        DrawNeonLedBar(memDC, w, h, color, isHorizontal);
+            COLORREF color = pThis ? pThis->m_currentColor : RGB(255, 45, 85);
+            bool isHorizontal = (w >= h);
+            DrawNeonLedBar(memDC, w, h, color, isHorizontal);
 
-        BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
 
-        SelectObject(memDC, oldBmp);
-        DeleteObject(memBmp);
-        DeleteDC(memDC);
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+        }
 
         EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_ERASEBKGND:
-        return 1; // 깜빡임 방지
+        return 1;
     case WM_NCHITTEST:
-        return HTTRANSPARENT; // 마우스 클릭 100% 하부 통과
+        return HTTRANSPARENT; // 마우스 클릭 100% 투과
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+    return 0;
 }
+

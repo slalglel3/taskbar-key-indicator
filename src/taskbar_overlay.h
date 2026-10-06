@@ -18,7 +18,12 @@ public:
     void UpdatePositions();
     void SetState(bool keyboardConnected, COLORREF disconnectedColor, COLORREF connectedColor, bool showWhenConnected, int thickness);
     void SetThickness(int thickness);
+    void SetColor(COLORREF color);
+    void ForceShowTest(int durationMs = 5000);
     void Cleanup();
+
+    bool IsOverlayVisible() const { return m_shouldShow || m_isTesting; }
+    COLORREF GetCurrentColor() const { return m_currentColor; }
 
 private:
     HINSTANCE m_hInstance;
@@ -26,6 +31,7 @@ private:
     bool m_keyboardConnected;
     COLORREF m_currentColor;
     bool m_shouldShow;
+    bool m_isTesting;
     int m_thickness;
 
     void CreateOrUpdateOverlays();

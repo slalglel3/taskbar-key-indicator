@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "logger.h"
 #include "config.h"
 #include "taskbar_overlay.h"
 #include "device_watcher.h"
@@ -17,24 +18,27 @@ enum MenuIDs {
     IDM_STATUS_HEADER = 1001,
     IDM_TARGET_NAME,
     IDM_SEPARATOR_1,
-    IDM_LOCK_CURRENT_KB,
-    IDM_AUTO_DETECT_KB,
+    IDM_TEST_OVERLAY,
+    IDM_OPEN_LOG,
     IDM_SEPARATOR_2,
+    IDM_AUTO_DETECT_KB,
+    IDM_KB_LIST_BASE = 2000, // 감지된 개별 키보드 선택 메뉴 (동적 2000 ~ 2099)
+    IDM_SEPARATOR_3 = 2100,
     IDM_COLOR_RED,
     IDM_COLOR_ORANGE,
     IDM_COLOR_AMBER,
     IDM_COLOR_PINK,
     IDM_COLOR_BLUE,
-    IDM_SEPARATOR_3,
+    IDM_SEPARATOR_4,
     IDM_THICKNESS_2,
     IDM_THICKNESS_3,
     IDM_THICKNESS_4,
     IDM_THICKNESS_5,
-    IDM_SEPARATOR_4,
+    IDM_SEPARATOR_5,
     IDM_SHOW_WHEN_CONNECTED,
     IDM_AUTO_START,
     IDM_OPEN_CONFIG,
-    IDM_SEPARATOR_5,
+    IDM_SEPARATOR_6,
     IDM_EXIT
 };
 
@@ -56,6 +60,7 @@ private:
     AppConfig m_config;
     TaskbarOverlayManager m_overlayMgr;
     DeviceWatcher m_deviceWatcher;
+    std::vector<KeyboardDeviceInfo> m_cachedKeyboards;
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -81,6 +86,7 @@ Application::Application()
 }
 
 Application::~Application() {
+    Logger::Log(L"[App] Shutting down application...");
     if (m_hCurrentTrayIcon) {
         DestroyIcon(m_hCurrentTrayIcon);
         m_hCurrentTrayIcon = NULL;
@@ -149,7 +155,11 @@ void Application::SetupTrayIcon() {
     m_nid.hIcon = m_hCurrentTrayIcon;
     wcscpy_s(m_nid.szTip, L"Taskbar Key Indicator");
 
-    Shell_NotifyIconW(NIM_ADD, &m_nid);
+    if (Shell_NotifyIconW(NIM_ADD, &m_nid)) {
+        Logger::Log(L"[Tray] Tray icon added successfully.");
+    } else {
+        Logger::Log(L"[Tray] Failed to add tray icon! Error: %lu", GetLastError());
+    }
 }
 
 void Application::UpdateTrayIcon(bool isConnected) {
@@ -173,6 +183,9 @@ void Application::UpdateTrayIcon(bool isConnected) {
 }
 
 void Application::UpdateState(bool isConnected, const std::wstring& devName) {
+    Logger::Log(L"[App] UpdateState -> Connected: %s, Device: %s",
+        isConnected ? L"YES" : L"NO", devName.c_str());
+
     m_overlayMgr.SetState(
         isConnected,
         m_config.disconnectedColor,
@@ -196,18 +209,41 @@ void Application::ShowContextMenu() {
     std::wstring statusStr = isConnected ? L"● 상태: 유선 연결됨 (PC 활성)" : L"○ 상태: 무선 전환됨 (유선 분리)";
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_STATUS_HEADER, statusStr.c_str());
 
-    std::wstring kbDesc = L"  감지: " + targetName;
+    std::wstring kbDesc = L"  타겟: " + targetName;
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_TARGET_NAME, kbDesc.c_str());
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_1, NULL);
 
-    // 2. 키보드 타겟 설정
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.autoDetect ? 0 : MF_CHECKED), IDM_LOCK_CURRENT_KB, L"현재 키보드를 감시 타겟으로 고정");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.autoDetect ? MF_CHECKED : 0), IDM_AUTO_DETECT_KB, L"자동 감지 모드 (기본값)");
+    // 2. 진단 및 테스트 기능 (핵심!)
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
 
-    // 3. LED 색상 서브메뉴
+    // 3. 키보드 타겟 선택 서브메뉴
+    m_cachedKeyboards = m_deviceWatcher.GetConnectedKeyboards();
+    HMENU hKbMenu = CreatePopupMenu();
+    InsertMenuW(hKbMenu, -1, MF_BYPOSITION | MF_STRING | (m_deviceWatcher.IsAutoDetect() ? MF_CHECKED : 0),
+        IDM_AUTO_DETECT_KB, L"자동 감지 모드 (Auto-Detect)");
+
+    if (!m_cachedKeyboards.empty()) {
+        InsertMenuW(hKbMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+        for (size_t i = 0; i < m_cachedKeyboards.size() && i < 10; ++i) {
+            const auto& kb = m_cachedKeyboards[i];
+            bool isCurrentTarget = (!m_deviceWatcher.IsAutoDetect() &&
+                kb.vid == m_deviceWatcher.GetTargetVid() &&
+                kb.pid == m_deviceWatcher.GetTargetPid());
+
+            std::wstring itemText = L"[" + kb.vid + L":" + kb.pid + L"] " + kb.friendlyName;
+            InsertMenuW(hKbMenu, -1, MF_BYPOSITION | MF_STRING | (isCurrentTarget ? MF_CHECKED : 0),
+                IDM_KB_LIST_BASE + (UINT)i, itemText.c_str());
+        }
+    }
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hKbMenu, L"🎯 감시할 키보드 선택");
+
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_3, NULL);
+
+    // 4. LED 색상 서브메뉴
     HMENU hColorMenu = CreatePopupMenu();
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 45, 85) ? MF_CHECKED : 0), IDM_COLOR_RED, L"네온 레드 (#FF2D55) [기본]");
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 149, 0) ? MF_CHECKED : 0), IDM_COLOR_ORANGE, L"네온 오렌지 (#FF9500)");
@@ -216,7 +252,7 @@ void Application::ShowContextMenu() {
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(0, 122, 255) ? MF_CHECKED : 0), IDM_COLOR_BLUE, L"네온 블루 (#007AFF)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hColorMenu, L"LED 바 색상 설정");
 
-    // 4. LED 바 두께 서브메뉴
+    // 5. LED 바 두께 서브메뉴
     HMENU hThickMenu = CreatePopupMenu();
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 2 ? MF_CHECKED : 0), IDM_THICKNESS_2, L"2 픽셀");
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 3 ? MF_CHECKED : 0), IDM_THICKNESS_3, L"3 픽셀 [권장]");
@@ -224,15 +260,15 @@ void Application::ShowContextMenu() {
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 5 ? MF_CHECKED : 0), IDM_THICKNESS_5, L"5 픽셀");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hThickMenu, L"LED 바 두께 설정");
 
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_3, NULL);
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_4, NULL);
 
-    // 5. 옵션
+    // 6. 옵션
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.showWhenConnected ? MF_CHECKED : 0), IDM_SHOW_WHEN_CONNECTED, L"유선 연결 시에도 초록 LED 표시");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.autoStart ? MF_CHECKED : 0), IDM_AUTO_START, L"윈도우 시작 시 자동 실행");
 
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_4, NULL);
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_5, NULL);
 
-    // 6. 설정 파일 열기 & 종료
+    // 7. 설정 파일 열기 & 종료
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_CONFIG, L"설정 파일 열기 (config.ini)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_EXIT, L"종료 (Exit)");
 
@@ -243,19 +279,28 @@ void Application::ShowContextMenu() {
 
     if (cmd == 0) return;
 
-    switch (cmd) {
-    case IDM_LOCK_CURRENT_KB: {
-        auto kbs = m_deviceWatcher.GetConnectedKeyboards();
-        if (!kbs.empty()) {
-            m_config.targetVid = kbs[0].vid;
-            m_config.targetPid = kbs[0].pid;
-            m_config.targetDeviceName = kbs[0].friendlyName;
-            m_config.autoDetect = false;
-            m_deviceWatcher.SetTarget(m_config.targetVid, m_config.targetPid);
-            ConfigManager::SaveConfig(m_config);
-        }
-        break;
+    if (cmd >= IDM_KB_LIST_BASE && cmd < IDM_KB_LIST_BASE + (int)m_cachedKeyboards.size()) {
+        size_t idx = cmd - IDM_KB_LIST_BASE;
+        const auto& kb = m_cachedKeyboards[idx];
+        m_config.targetVid = kb.vid;
+        m_config.targetPid = kb.pid;
+        m_config.targetDeviceName = kb.friendlyName;
+        m_config.autoDetect = false;
+        m_deviceWatcher.SetTarget(kb.vid, kb.pid, kb.friendlyName);
+        ConfigManager::SaveConfig(m_config);
+        Logger::Log(L"[Tray] User locked target keyboard to VID_%s PID_%s", kb.vid.c_str(), kb.pid.c_str());
+        return;
     }
+
+    switch (cmd) {
+    case IDM_TEST_OVERLAY:
+        m_overlayMgr.ForceShowTest(5000);
+        break;
+
+    case IDM_OPEN_LOG:
+        Logger::OpenLogFile();
+        break;
+
     case IDM_AUTO_DETECT_KB:
         m_config.autoDetect = true;
         m_config.targetVid.clear();
@@ -326,7 +371,7 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     if (!g_app) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     if (msg == g_app->m_wmTaskbarCreated) {
-        // 탐색기(Explorer) 재시작 감지: 트레이 아이콘 복원 및 작업표시줄 오버레이 재동기화
+        Logger::Log(L"[WndProc] TaskbarCreated message received from Shell. Recreating tray and overlays.");
         g_app->SetupTrayIcon();
         g_app->m_overlayMgr.UpdatePositions();
         return 0;
@@ -334,12 +379,13 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
     switch (msg) {
     case WM_DEVICECHANGE:
+        Logger::Log(L"[WndProc] WM_DEVICECHANGE intercepted by Top-level Window.");
         g_app->m_deviceWatcher.OnDeviceChange(wParam, lParam);
         return TRUE;
 
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
-        // 해상도 변경 또는 작업표시줄 설정 변경 시 오버레이 위치 자동 갱신
+        Logger::Log(L"[WndProc] Display/Setting change detected. Updating overlay positions.");
         g_app->m_overlayMgr.UpdatePositions();
         return 0;
 
@@ -361,56 +407,74 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 bool Application::Initialize(HINSTANCE hInstance) {
     m_hInstance = hInstance;
 
-    // 단일 인스턴스 중복 실행 방지
+    // 1. 로거 초기화 (가장 먼저 실행)
+    Logger::Init();
+    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.0.1...");
+
+    // 2. 단일 인스턴스 중복 실행 방지
     m_hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        Logger::Log(L"[App] Another instance is already running. Exiting.");
         MessageBoxW(NULL, L"Taskbar Key Indicator가 이미 실행 중입니다.\n작업표시줄 우측 트레이 영역을 확인하세요.", L"알림", MB_OK | MB_ICONINFORMATION);
         return false;
     }
 
-    // 설정 로드
+    // 3. 설정 로드
     m_config = ConfigManager::LoadConfig();
+    Logger::Log(L"[App] Config loaded: AutoDetect=%d, TargetVID=%s, TargetPID=%s, BarThickness=%d",
+        m_config.autoDetect ? 1 : 0, m_config.targetVid.c_str(), m_config.targetPid.c_str(), m_config.barThickness);
 
-    // 윈도우 클래스 등록 (백그라운드 메시지 전용 윈도우)
+    // 4. 최상위 숨김 윈도우 생성 (WS_POPUP, 0,0,0,0)
+    // [중요] HWND_MESSAGE는 WM_DEVICECHANGE 브로드캐스트를 받지 못하므로, 반드시 최상위 윈도우여야 함!
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
     wc.lpfnWndProc = Application::WndProc;
     wc.hInstance = m_hInstance;
     wc.lpszClassName = MAIN_WINDOW_CLASS;
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc)) {
+        Logger::Log(L"[App] Failed to register main window class! Error: %lu", GetLastError());
+    }
 
     m_hWnd = CreateWindowExW(
         0, MAIN_WINDOW_CLASS, L"TaskbarKeyIndicator_Core",
-        0, 0, 0, 0, 0,
-        HWND_MESSAGE, NULL, m_hInstance, NULL
+        WS_POPUP,
+        0, 0, 0, 0,
+        NULL, NULL, m_hInstance, NULL
     );
 
-    if (!m_hWnd) return false;
+    if (!m_hWnd) {
+        Logger::Log(L"[App] Failed to create main window! Error: %lu", GetLastError());
+        return false;
+    }
 
-    // Explorer 재시작 메시지 등록
+    ShowWindow(m_hWnd, SW_HIDE);
+    Logger::Log(L"[App] Main Top-level Hidden Window created: HWND %p", m_hWnd);
+
+    // Explorer 재시작 감지 등록
     m_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
-    // 오버레이 매니저 초기화
+    // 5. 오버레이 매니저 초기화
     m_overlayMgr.Initialize(m_hInstance);
 
-    // 트레이 아이콘 설정
+    // 6. 트레이 아이콘 설정
     SetupTrayIcon();
 
-    // 디바이스 와처 초기화 및 콜백 연결
+    // 7. 디바이스 와처 초기화 및 콜백 연결
     m_deviceWatcher.SetStateCallback([this](bool isConnected, const std::wstring& devName) {
         this->UpdateState(isConnected, devName);
     });
 
     if (!m_config.autoDetect && !m_config.targetVid.empty() && !m_config.targetPid.empty()) {
-        m_deviceWatcher.SetTarget(m_config.targetVid, m_config.targetPid);
+        m_deviceWatcher.SetTarget(m_config.targetVid, m_config.targetPid, m_config.targetDeviceName);
     } else {
         m_deviceWatcher.SetAutoDetect(true);
     }
 
     m_deviceWatcher.Initialize(m_hWnd);
 
-    // 초기 상태 반영
+    // 8. 초기 상태 즉시 반영
     UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
 
+    Logger::Log(L"[App] Initialization completed successfully.");
     return true;
 }
 
@@ -437,4 +501,3 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     Application app;
     return app.Run(hInstance);
 }
-
