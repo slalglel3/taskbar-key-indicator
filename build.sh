@@ -24,5 +24,8 @@ zig c++ -target x86_64-windows-gnu \
     -luser32 -lgdi32 -lshell32 -lshlwapi -ladvapi32 \
     -o dist/KeyIndicator.exe
 
+# 중간 빌드 부산물 자동 정리 (배포 폴더 클린 유지)
+rm -f dist/resources.res dist/*.pdb dist/*.lib
+
 echo "Build successful: dist/KeyIndicator.exe"
 ls -lh dist/KeyIndicator.exe
