@@ -2,14 +2,16 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <string>
+#include <algorithm>
 
+#include "resource.h"
 #include "logger.h"
 #include "config.h"
 #include "taskbar_overlay.h"
 #include "browser_watcher.h"
 
-static const wchar_t* MAIN_WINDOW_CLASS = L"TaskbarKeyIndicator_MsgWnd";
-static const wchar_t* MUTEX_NAME = L"TaskbarKeyIndicator_SingleInstance_Mutex";
+static const wchar_t* MAIN_WINDOW_CLASS = L"KeyIndicator_MsgWnd";
+static const wchar_t* MUTEX_NAME = L"KeyIndicator_SingleInstance_Mutex";
 static const UINT WM_TRAYICON_MSG = WM_APP + 101;
 static const UINT_PTR TIMER_WATCHDOG = 3001;
 
@@ -70,7 +72,7 @@ private:
     void SetupTrayIcon();
     void UpdateTrayIcon(bool isConnected);
     void ShowContextMenu();
-    HICON CreateLedIcon(COLORREF color);
+    HICON CreateKeycapIcon(COLORREF color);
 };
 
 static Application* g_app = nullptr;
@@ -95,7 +97,7 @@ void Application::Cleanup() {
     if (m_cleanedUp) return;
     m_cleanedUp = true;
 
-    Logger::Log(L"[App] Shutting down and cleaning up all resources...");
+    Logger::Log(L"[App] Shutting down KeyIndicator and cleaning up all resources...");
     if (m_hCurrentTrayIcon) {
         DestroyIcon(m_hCurrentTrayIcon);
         m_hCurrentTrayIcon = NULL;
@@ -115,44 +117,118 @@ void Application::Cleanup() {
     Logger::Close();
 }
 
-HICON Application::CreateLedIcon(COLORREF color) {
+// 큼직하고 세련된 미니멀 기계식 키캡(Keycap) 형태의 트레이 아이콘 동적 생성
+HICON Application::CreateKeycapIcon(COLORREF color) {
+    int iconSize = GetSystemMetrics(SM_CXSMICON);
+    if (iconSize < 16) iconSize = 16;
+    if (iconSize > 32) iconSize = 32;
+
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    HBITMAP hBmp = CreateCompatibleBitmap(hdcScreen, 16, 16);
+    HBITMAP hBmp = CreateCompatibleBitmap(hdcScreen, iconSize, iconSize);
     HBITMAP hOldBmp = (HBITMAP)SelectObject(hdcMem, hBmp);
 
-    HBITMAP hMask = CreateBitmap(16, 16, 1, 1, NULL);
+    HBITMAP hMask = CreateBitmap(iconSize, iconSize, 1, 1, NULL);
     HDC hdcMask = CreateCompatibleDC(hdcScreen);
     HBITMAP hOldMask = (HBITMAP)SelectObject(hdcMask, hMask);
 
-    RECT rc = { 0, 0, 16, 16 };
-    HBRUSH hBrBlackStock = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    HBRUSH hBrWhiteStock = (HBRUSH)GetStockObject(WHITE_BRUSH);
-    FillRect(hdcMem, &rc, hBrBlackStock);
-    FillRect(hdcMask, &rc, hBrWhiteStock);
+    // 배경 초기화
+    RECT rcFull = { 0, 0, iconSize, iconSize };
+    HBRUSH hBrBlack = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    HBRUSH hBrWhite = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(hdcMem, &rcFull, hBrBlack);
+    FillRect(hdcMask, &rcFull, hBrWhite);
 
-    HBRUSH hBrColor = CreateSolidBrush(color);
-    HBRUSH hOldBrMem = (HBRUSH)SelectObject(hdcMem, hBrColor);
-    HBRUSH hOldBrMask = (HBRUSH)SelectObject(hdcMask, hBrBlackStock);
+    int pad = 1;
+    int baseLeft = pad;
+    int baseTop = pad + 1;
+    int baseRight = iconSize - pad;
+    int baseBottom = iconSize - pad;
+    int cornerR = (std::max)(3, iconSize / 5);
 
-    Ellipse(hdcMem, 2, 2, 14, 14);
-    Ellipse(hdcMask, 2, 2, 14, 14);
+    // 1. 마스크에 키캡 실루엣을 검정색(불투명)으로 그리기
+    HBRUSH hOldMaskBr = (HBRUSH)SelectObject(hdcMask, hBrBlack);
+    HPEN hOldMaskPen = (HPEN)SelectObject(hdcMask, GetStockObject(NULL_PEN));
+    RoundRect(hdcMask, baseLeft, baseTop, baseRight, baseBottom, cornerR * 2, cornerR * 2);
 
-    // 하이라이트 코어 (엄격한 대칭 복원)
-    HBRUSH hBrWhite = CreateSolidBrush(RGB(255, 255, 255));
-    HBRUSH hPrevBr = (HBRUSH)SelectObject(hdcMem, hBrWhite);
-    Ellipse(hdcMem, 4, 4, 8, 8);
-    SelectObject(hdcMem, hPrevBr);
+    // 2. 키캡 하단 베이스 (Dark Slate Charcoal)
+    HBRUSH hBrBase = CreateSolidBrush(RGB(30, 33, 40));
+    HPEN hPenBase = CreatePen(PS_SOLID, 1, RGB(18, 20, 24));
+    HBRUSH hOldBr = (HBRUSH)SelectObject(hdcMem, hBrBase);
+    HPEN hOldPen = (HPEN)SelectObject(hdcMem, hPenBase);
+    RoundRect(hdcMem, baseLeft, baseTop, baseRight, baseBottom, cornerR * 2, cornerR * 2);
 
-    // 원래 기본 브러시 및 비트맵으로 완벽 복원 후 DC 삭제
-    SelectObject(hdcMem, hOldBrMem);
-    SelectObject(hdcMask, hOldBrMask);
+    // 3. 키캡 상단 탑 페이스 (Deep Matte Key Surface)
+    int insetX = (std::max)(2, iconSize / 7);
+    int insetTop = (std::max)(1, iconSize / 9);
+    int insetBottom = (std::max)(3, iconSize / 5);
+    int topR = (std::max)(2, cornerR - 1);
+
+    HBRUSH hBrTop = CreateSolidBrush(RGB(48, 53, 62));
+    HPEN hPenTopRim = CreatePen(PS_SOLID, 1, RGB(72, 78, 92)); // 상단 림 하이라이트
+    SelectObject(hdcMem, hBrTop);
+    SelectObject(hdcMem, hPenTopRim);
+    RoundRect(hdcMem, baseLeft + insetX, baseTop + insetTop, baseRight - insetX, baseBottom - insetBottom, topR * 2, topR * 2);
+
+    // 4. 중앙 네온 LED 인디케이터 바
+    int ledMarginX = (std::max)(3, iconSize / 4);
+    int ledTop = baseTop + insetTop + (std::max)(2, (baseBottom - insetBottom - baseTop - insetTop) / 3);
+    int ledHeight = (std::max)(3, iconSize / 5);
+    int ledBottom = ledTop + ledHeight;
+    int ledLeft = baseLeft + ledMarginX;
+    int ledRight = baseRight - ledMarginX;
+    int ledR = (std::max)(2, ledHeight / 2);
+
+    // 네온 글로우 외곽
+    COLORREF glowCol = RGB(
+        (GetRValue(color) + 48) / 2,
+        (GetGValue(color) + 52) / 2,
+        (GetBValue(color) + 60) / 2
+    );
+    HBRUSH hBrGlow = CreateSolidBrush(glowCol);
+    SelectObject(hdcMem, hBrGlow);
+    SelectObject(hdcMem, GetStockObject(NULL_PEN));
+    RoundRect(hdcMem, ledLeft - 1, ledTop - 1, ledRight + 1, ledBottom + 1, (ledR + 1) * 2, (ledR + 1) * 2);
+
+    // 네온 메인 컬러
+    HBRUSH hBrLed = CreateSolidBrush(color);
+    SelectObject(hdcMem, hBrLed);
+    RoundRect(hdcMem, ledLeft, ledTop, ledRight, ledBottom, ledR * 2, ledR * 2);
+
+    // 퓨어 화이트 핫스팟 코어
+    if (ledHeight >= 3 && (ledRight - ledLeft) >= 4) {
+        int coreLeft = ledLeft + (std::max)(1, (ledRight - ledLeft) / 4);
+        int coreRight = ledRight - (std::max)(1, (ledRight - ledLeft) / 4);
+        int coreTop = ledTop + 1;
+        int coreBottom = ledBottom - 1;
+        if (coreBottom > coreTop && coreRight > coreLeft) {
+            HBRUSH hBrCore = CreateSolidBrush(RGB(255, 255, 255));
+            SelectObject(hdcMem, hBrCore);
+            RoundRect(hdcMem, coreLeft, coreTop, coreRight, coreBottom, 2, 2);
+            SelectObject(hdcMem, hOldBr);
+            DeleteObject(hBrCore);
+        }
+    }
+
+    // DC 및 스톡 객체 원상 복원
+    SelectObject(hdcMem, hOldBr);
+    SelectObject(hdcMem, hOldPen);
+    SelectObject(hdcMask, hOldMaskBr);
+    SelectObject(hdcMask, hOldMaskPen);
     SelectObject(hdcMem, hOldBmp);
     SelectObject(hdcMask, hOldMask);
 
     DeleteDC(hdcMem);
     DeleteDC(hdcMask);
     ReleaseDC(NULL, hdcScreen);
+
+    // 커스텀 GDI 리소스 삭제
+    DeleteObject(hBrBase);
+    DeleteObject(hPenBase);
+    DeleteObject(hBrTop);
+    DeleteObject(hPenTopRim);
+    DeleteObject(hBrGlow);
+    DeleteObject(hBrLed);
 
     ICONINFO ii = { 0 };
     ii.fIcon = TRUE;
@@ -162,8 +238,6 @@ HICON Application::CreateLedIcon(COLORREF color) {
 
     DeleteObject(hBmp);
     DeleteObject(hMask);
-    DeleteObject(hBrColor);
-    DeleteObject(hBrWhite);
 
     return hIcon;
 }
@@ -175,12 +249,12 @@ void Application::SetupTrayIcon() {
     m_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     m_nid.uCallbackMessage = WM_TRAYICON_MSG;
 
-    m_hCurrentTrayIcon = CreateLedIcon(RGB(50, 215, 75));
+    m_hCurrentTrayIcon = CreateKeycapIcon(RGB(50, 215, 75));
     m_nid.hIcon = m_hCurrentTrayIcon;
-    wcscpy_s(m_nid.szTip, L"Taskbar Key Indicator");
+    wcscpy_s(m_nid.szTip, L"Key Indicator");
 
     if (Shell_NotifyIconW(NIM_ADD, &m_nid)) {
-        Logger::Log(L"[Tray] Tray icon added successfully.");
+        Logger::Log(L"[Tray] Keycap tray icon added successfully.");
     } else {
         Logger::Log(L"[Tray] Failed to add tray icon! Error: %lu", GetLastError());
     }
@@ -192,7 +266,7 @@ void Application::UpdateTrayIcon(bool isConnected) {
     if (m_hCurrentTrayIcon) {
         DestroyIcon(m_hCurrentTrayIcon);
     }
-    m_hCurrentTrayIcon = CreateLedIcon(icoColor);
+    m_hCurrentTrayIcon = CreateKeycapIcon(icoColor);
     m_nid.hIcon = m_hCurrentTrayIcon;
 
     std::wstring tip = L"Key Indicator: ";
@@ -247,7 +321,7 @@ void Application::ShowContextMenu() {
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
 
-    // 3. 모바일 전환 시 표시 스타일 서브메뉴 (핵심 개선 기능!)
+    // 3. 모바일 전환 시 표시 스타일 서브메뉴
     HMENU hStyleMenu = CreatePopupMenu();
     InsertMenuW(hStyleMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedStyle == 1 ? MF_CHECKED : 0),
         IDM_STYLE_TINT, L"작업표시줄 전체 틴트 덮기 (시인성 극대화) [추천]");
@@ -264,7 +338,7 @@ void Application::ShowContextMenu() {
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(0, 122, 255) ? MF_CHECKED : 0), IDM_COLOR_BLUE, L"네온 블루 (#007AFF)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hColorMenu, L"모바일 전환 색상 설정");
 
-    // 5. LED 바 두께 서브메뉴 (LED 바 모드 및 상단 하이라이트 두께)
+    // 5. LED 바 두께 서브메뉴
     HMENU hThickMenu = CreatePopupMenu();
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 2 ? MF_CHECKED : 0), IDM_THICKNESS_2, L"2 픽셀");
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 3 ? MF_CHECKED : 0), IDM_THICKNESS_3, L"3 픽셀 [권장]");
@@ -429,15 +503,15 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 bool Application::Initialize(HINSTANCE hInstance) {
     m_hInstance = hInstance;
 
-    // 1. 로거 초기화 (가장 먼저 실행)
+    // 1. 로거 초기화
     Logger::Init();
-    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.3.0 (Taskbar Tint & LED Bar Dual Mode)...");
+    Logger::Log(L"[App] Initializing KeyIndicator v1.3.1 (Keycap Icon Edition)...");
 
     // 2. 단일 인스턴스 중복 실행 방지
     m_hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         Logger::Log(L"[App] Another instance is already running. Exiting.");
-        MessageBoxW(NULL, L"Taskbar Key Indicator가 이미 실행 중입니다.\n작업표시줄 우측 트레이 영역을 확인하세요.", L"알림", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(NULL, L"Key Indicator가 이미 실행 중입니다.\n작업표시줄 우측 트레이 영역을 확인하세요.", L"알림", MB_OK | MB_ICONINFORMATION);
         return false;
     }
 
@@ -451,12 +525,15 @@ bool Application::Initialize(HINSTANCE hInstance) {
     wc.lpfnWndProc = Application::WndProc;
     wc.hInstance = m_hInstance;
     wc.lpszClassName = MAIN_WINDOW_CLASS;
+    wc.hIcon = LoadIconW(m_hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = (HICON)LoadImageW(m_hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                  GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
     if (!RegisterClassExW(&wc)) {
         Logger::Log(L"[App] Failed to register main window class! Error: %lu", GetLastError());
     }
 
     m_hWnd = CreateWindowExW(
-        0, MAIN_WINDOW_CLASS, L"TaskbarKeyIndicator_Core",
+        0, MAIN_WINDOW_CLASS, L"KeyIndicator_Core",
         WS_POPUP,
         0, 0, 0, 0,
         NULL, NULL, m_hInstance, NULL
@@ -476,10 +553,10 @@ bool Application::Initialize(HINSTANCE hInstance) {
     // 5. 오버레이 매니저 초기화
     m_overlayMgr.Initialize(m_hInstance);
 
-    // 6. 트레이 아이콘 설정
+    // 6. 트레이 아이콘 설정 (키캡 모양)
     SetupTrayIcon();
 
-    // 7. 브라우저 실시간(0ms) 타이틀 와처 초기화 및 콜백 연결 (단일 순수 엔진)
+    // 7. 브라우저 실시간(0ms) 타이틀 와처 초기화 및 콜백 연결
     m_browserWatcher.SetStateCallback([this](bool isConnected, const std::wstring& title) {
         this->UpdateState(isConnected, title);
     });
@@ -489,7 +566,7 @@ bool Application::Initialize(HINSTANCE hInstance) {
     m_browserWatcher.CheckCurrentState();
     UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
 
-    // 8. 1초 주기 경량 워치독 타이머 시작 (보조 동기화 및 오버레이 위치 검증)
+    // 8. 1초 주기 경량 워치독 타이머 시작
     SetTimer(m_hWnd, TIMER_WATCHDOG, 1000, NULL);
 
     Logger::Log(L"[App] Initialization completed successfully.");

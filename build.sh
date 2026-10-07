@@ -6,7 +6,10 @@ cd "${SCRIPT_DIR}"
 
 mkdir -p dist
 
-echo "=== Building TaskbarKeyIndicator (Windows x86_64 GUI) ==="
+echo "=== Compiling Windows Resources (Keycap Icon) ==="
+zig rc -i src -i . src/resources.rc dist/resources.res
+
+echo "=== Building KeyIndicator (Windows x86_64 GUI) ==="
 zig c++ -target x86_64-windows-gnu \
     -O2 \
     -Wl,--subsystem,windows \
@@ -17,8 +20,9 @@ zig c++ -target x86_64-windows-gnu \
     src/logger.cpp \
     src/taskbar_overlay.cpp \
     src/browser_watcher.cpp \
+    dist/resources.res \
     -luser32 -lgdi32 -lshell32 -lshlwapi -ladvapi32 \
-    -o dist/TaskbarKeyIndicator.exe
+    -o dist/KeyIndicator.exe
 
-echo "Build successful: dist/TaskbarKeyIndicator.exe"
-ls -lh dist/TaskbarKeyIndicator.exe
+echo "Build successful: dist/KeyIndicator.exe"
+ls -lh dist/KeyIndicator.exe

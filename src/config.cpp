@@ -6,7 +6,7 @@
 static const wchar_t* CONFIG_FILENAME = L"config.ini";
 static const wchar_t* SECTION_GENERAL = L"Settings";
 static const wchar_t* RUN_KEY_PATH = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-static const wchar_t* APP_REG_NAME = L"TaskbarKeyIndicator";
+static const wchar_t* APP_REG_NAME = L"KeyIndicator";
 
 std::wstring ConfigManager::GetConfigPath() {
     wchar_t path[MAX_PATH];
