@@ -118,6 +118,7 @@ void Application::Cleanup() {
 }
 
 // 큼직하고 세련된 미니멀 기계식 키캡(Keycap) 형태의 트레이 아이콘 동적 생성
+// [개선] 캔버스를 100% 꽉 채우고, 외곽에 1px 순백색 테두리를 둘러 윈도우 다크 테마에서도 선명하게 부각
 HICON Application::CreateKeycapIcon(COLORREF color) {
     int iconSize = GetSystemMetrics(SM_CXSMICON);
     if (iconSize < 16) iconSize = 16;
@@ -132,48 +133,47 @@ HICON Application::CreateKeycapIcon(COLORREF color) {
     HDC hdcMask = CreateCompatibleDC(hdcScreen);
     HBITMAP hOldMask = (HBITMAP)SelectObject(hdcMask, hMask);
 
-    // 배경 초기화
+    // 배경 초기화 (마스크: 흰색=투명, 검정=불투명)
     RECT rcFull = { 0, 0, iconSize, iconSize };
     HBRUSH hBrBlack = (HBRUSH)GetStockObject(BLACK_BRUSH);
     HBRUSH hBrWhite = (HBRUSH)GetStockObject(WHITE_BRUSH);
     FillRect(hdcMem, &rcFull, hBrBlack);
     FillRect(hdcMask, &rcFull, hBrWhite);
 
-    int pad = 1;
-    int baseLeft = pad;
-    int baseTop = pad + 1;
-    int baseRight = iconSize - pad;
-    int baseBottom = iconSize - pad;
-    int cornerR = (std::max)(3, iconSize / 5);
+    // [크기 최대화] 여백(pad)을 0으로 두어 캔버스 전체를 꽉 채움
+    int baseLeft = 0;
+    int baseTop = 0;
+    int baseRight = iconSize;
+    int baseBottom = iconSize;
+    int cornerR = (std::max)(2, iconSize / 5);
 
     // 1. 마스크에 키캡 실루엣을 검정색(불투명)으로 그리기
     HBRUSH hOldMaskBr = (HBRUSH)SelectObject(hdcMask, hBrBlack);
     HPEN hOldMaskPen = (HPEN)SelectObject(hdcMask, GetStockObject(NULL_PEN));
     RoundRect(hdcMask, baseLeft, baseTop, baseRight, baseBottom, cornerR * 2, cornerR * 2);
 
-    // 2. 키캡 하단 베이스 (Dark Slate Charcoal)
-    HBRUSH hBrBase = CreateSolidBrush(RGB(30, 33, 40));
-    HPEN hPenBase = CreatePen(PS_SOLID, 1, RGB(18, 20, 24));
+    // 2. 키캡 외곽 화이트 테두리 + 베이스 본체 (다크 테마 시인성 극대화!)
+    // 얇고 깔끔한 순백색 1px 외곽선으로 어두운 작업표시줄에서 키캡 윤곽을 칼같이 분리
+    HPEN hPenWhiteBorder = CreatePen(PS_SOLID, 1, RGB(245, 248, 255));
+    HBRUSH hBrBase = CreateSolidBrush(RGB(36, 40, 48)); // 세련된 다크 차콜
     HBRUSH hOldBr = (HBRUSH)SelectObject(hdcMem, hBrBase);
-    HPEN hOldPen = (HPEN)SelectObject(hdcMem, hPenBase);
+    HPEN hOldPen = (HPEN)SelectObject(hdcMem, hPenWhiteBorder);
     RoundRect(hdcMem, baseLeft, baseTop, baseRight, baseBottom, cornerR * 2, cornerR * 2);
 
-    // 3. 키캡 상단 탑 페이스 (Deep Matte Key Surface)
-    int insetX = (std::max)(2, iconSize / 7);
-    int insetTop = (std::max)(1, iconSize / 9);
-    int insetBottom = (std::max)(3, iconSize / 5);
+    // 3. 키캡 상단 탑 페이스 (Matte Keycap Dish - 큼직하게 확장)
+    int inset = (std::max)(1, iconSize / 8); // 16px 기준 2px
     int topR = (std::max)(2, cornerR - 1);
 
-    HBRUSH hBrTop = CreateSolidBrush(RGB(48, 53, 62));
-    HPEN hPenTopRim = CreatePen(PS_SOLID, 1, RGB(72, 78, 92)); // 상단 림 하이라이트
+    HBRUSH hBrTop = CreateSolidBrush(RGB(54, 60, 72));
+    HPEN hPenTopRim = CreatePen(PS_SOLID, 1, RGB(80, 88, 102)); // 상단 림 하이라이트
     SelectObject(hdcMem, hBrTop);
     SelectObject(hdcMem, hPenTopRim);
-    RoundRect(hdcMem, baseLeft + insetX, baseTop + insetTop, baseRight - insetX, baseBottom - insetBottom, topR * 2, topR * 2);
+    RoundRect(hdcMem, baseLeft + inset, baseTop + inset, baseRight - inset, baseBottom - inset, topR * 2, topR * 2);
 
-    // 4. 중앙 네온 LED 인디케이터 바
-    int ledMarginX = (std::max)(3, iconSize / 4);
-    int ledTop = baseTop + insetTop + (std::max)(2, (baseBottom - insetBottom - baseTop - insetTop) / 3);
-    int ledHeight = (std::max)(3, iconSize / 5);
+    // 4. 중앙 네온 LED 인디케이터 바 (크기 대폭 확대 및 시인성 강화)
+    int ledMarginX = inset + (std::max)(1, iconSize / 8);
+    int ledHeight = (std::max)(3, iconSize / 4);
+    int ledTop = (iconSize - ledHeight) / 2;
     int ledBottom = ledTop + ledHeight;
     int ledLeft = baseLeft + ledMarginX;
     int ledRight = baseRight - ledMarginX;
@@ -181,9 +181,9 @@ HICON Application::CreateKeycapIcon(COLORREF color) {
 
     // 네온 글로우 외곽
     COLORREF glowCol = RGB(
-        (GetRValue(color) + 48) / 2,
-        (GetGValue(color) + 52) / 2,
-        (GetBValue(color) + 60) / 2
+        (GetRValue(color) + 54) / 2,
+        (GetGValue(color) + 60) / 2,
+        (GetBValue(color) + 72) / 2
     );
     HBRUSH hBrGlow = CreateSolidBrush(glowCol);
     SelectObject(hdcMem, hBrGlow);
@@ -195,7 +195,7 @@ HICON Application::CreateKeycapIcon(COLORREF color) {
     SelectObject(hdcMem, hBrLed);
     RoundRect(hdcMem, ledLeft, ledTop, ledRight, ledBottom, ledR * 2, ledR * 2);
 
-    // 퓨어 화이트 핫스팟 코어
+    // 퓨어 화이트 핫스팟 코어 (중앙 선명한 발광점)
     if (ledHeight >= 3 && (ledRight - ledLeft) >= 4) {
         int coreLeft = ledLeft + (std::max)(1, (ledRight - ledLeft) / 4);
         int coreRight = ledRight - (std::max)(1, (ledRight - ledLeft) / 4);
@@ -222,9 +222,9 @@ HICON Application::CreateKeycapIcon(COLORREF color) {
     DeleteDC(hdcMask);
     ReleaseDC(NULL, hdcScreen);
 
-    // 커스텀 GDI 리소스 삭제
+    // 커스텀 GDI 리소스 삭제 (Zero-Leak)
+    DeleteObject(hPenWhiteBorder);
     DeleteObject(hBrBase);
-    DeleteObject(hPenBase);
     DeleteObject(hBrTop);
     DeleteObject(hPenTopRim);
     DeleteObject(hBrGlow);
