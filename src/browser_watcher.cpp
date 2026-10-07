@@ -4,8 +4,7 @@
 BrowserWatcher* BrowserWatcher::s_instance = nullptr;
 
 BrowserWatcher::BrowserWatcher()
-    : m_hMainWnd(NULL)
-    , m_hHook(NULL)
+    : m_hHook(NULL)
     , m_isConnected(true)
     , m_hasState(false)
 {
@@ -19,9 +18,33 @@ BrowserWatcher::~BrowserWatcher() {
     }
 }
 
-bool BrowserWatcher::Initialize(HWND hMainWnd) {
-    m_hMainWnd = hMainWnd;
+bool BrowserWatcher::SafeGetWindowTitle(HWND hwnd, wchar_t* buf, int maxLen) {
+    if (!hwnd || !buf || maxLen <= 0) return false;
+    buf[0] = L'\0';
 
+    // 대상 윈도우 프로세스가 Hang(응답 없음) 상태인 경우 프로세스 교착을 원천 차단하기 위해
+    // SMTO_ABORTIFHUNG + 50ms 타임아웃 적용
+    DWORD_PTR res = 0;
+    LRESULT lr = SendMessageTimeoutW(
+        hwnd,
+        WM_GETTEXT,
+        (WPARAM)maxLen,
+        (LPARAM)buf,
+        SMTO_ABORTIFHUNG | SMTO_NORMAL,
+        50,
+        &res
+    );
+
+    if (lr != 0 && res > 0) {
+        return true;
+    }
+
+    // 대상 프로세스가 아닌 가상 데스크톱/특수 창 대비 GetWindowTextW 보조 조회
+    int len = GetWindowTextW(hwnd, buf, maxLen);
+    return (len > 0);
+}
+
+bool BrowserWatcher::Initialize() {
     // Windows OS 레벨 창 이름 변경 이벤트(EVENT_OBJECT_NAMECHANGE) 훅 등록 (CPU 부하 0.00%)
     m_hHook = SetWinEventHook(
         EVENT_OBJECT_NAMECHANGE,
@@ -59,7 +82,7 @@ void BrowserWatcher::SetStateCallback(std::function<void(bool, const std::wstrin
 BOOL CALLBACK BrowserWatcher::EnumWindowsInitProc(HWND hwnd, LPARAM lParam) {
     BrowserWatcher* self = (BrowserWatcher*)lParam;
     wchar_t buf[512] = { 0 };
-    if (GetWindowTextW(hwnd, buf, 512) > 0) {
+    if (SafeGetWindowTitle(hwnd, buf, 512)) {
         std::wstring title(buf);
         if (title.find(L"Donagy") != std::wstring::npos) {
             if (title.find(L"[MB]") != std::wstring::npos || title.find(L"[PC]") != std::wstring::npos) {
@@ -94,8 +117,9 @@ void CALLBACK BrowserWatcher::WinEventProc(
 
 void BrowserWatcher::HandleTitleChange(HWND hwnd) {
     wchar_t buf[512] = { 0 };
-    int len = GetWindowTextW(hwnd, buf, 512);
-    if (len <= 0) return;
+    if (!SafeGetWindowTitle(hwnd, buf, 512)) {
+        return;
+    }
 
     std::wstring title(buf);
 

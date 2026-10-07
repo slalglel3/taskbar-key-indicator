@@ -379,6 +379,14 @@ void TaskbarOverlayManager::ForceShowTest(int durationMs) {
 }
 
 LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCCREATE) {
+        CREATESTRUCTW* pCS = (CREATESTRUCTW*)lParam;
+        if (pCS && pCS->lpCreateParams) {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)pCS->lpCreateParams);
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
     TaskbarOverlayManager* pThis = (TaskbarOverlayManager*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
     switch (msg) {

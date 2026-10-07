@@ -45,6 +45,7 @@ public:
     ~Application();
 
     int Run(HINSTANCE hInstance);
+    void Cleanup();
 
 private:
     HINSTANCE m_hInstance;
@@ -53,6 +54,7 @@ private:
     UINT m_wmTaskbarCreated;
     NOTIFYICONDATAW m_nid;
     HICON m_hCurrentTrayIcon;
+    bool m_cleanedUp;
 
     AppConfig m_config;
     TaskbarOverlayManager m_overlayMgr;
@@ -76,21 +78,32 @@ Application::Application()
     , m_hMutex(NULL)
     , m_wmTaskbarCreated(0)
     , m_hCurrentTrayIcon(NULL)
+    , m_cleanedUp(false)
 {
     memset(&m_nid, 0, sizeof(m_nid));
     g_app = this;
 }
 
 Application::~Application() {
-    Logger::Log(L"[App] Shutting down application...");
+    Cleanup();
+}
+
+void Application::Cleanup() {
+    if (m_cleanedUp) return;
+    m_cleanedUp = true;
+
+    Logger::Log(L"[App] Shutting down and cleaning up all resources...");
     if (m_hCurrentTrayIcon) {
         DestroyIcon(m_hCurrentTrayIcon);
         m_hCurrentTrayIcon = NULL;
     }
     Shell_NotifyIconW(NIM_DELETE, &m_nid);
+    m_overlayMgr.Cleanup();
     m_browserWatcher.Cleanup();
     if (m_hWnd) {
         KillTimer(m_hWnd, TIMER_WATCHDOG);
+        DestroyWindow(m_hWnd);
+        m_hWnd = NULL;
     }
     if (m_hMutex) {
         CloseHandle(m_hMutex);
@@ -122,12 +135,13 @@ HICON Application::CreateLedIcon(COLORREF color) {
     Ellipse(hdcMem, 2, 2, 14, 14);
     Ellipse(hdcMask, 2, 2, 14, 14);
 
-    // 하이라이트 코어
+    // 하이라이트 코어 (드로잉 전후 엄격한 브러시 스택 복원)
     HBRUSH hBrWhite = CreateSolidBrush(RGB(255, 255, 255));
-    SelectObject(hdcMem, hBrWhite);
+    HBRUSH hPrevBr = (HBRUSH)SelectObject(hdcMem, hBrWhite);
     Ellipse(hdcMem, 4, 4, 8, 8);
+    SelectObject(hdcMem, hPrevBr); // 원래 색상 브러시로 즉각 복원
 
-    // [중요] 원래 브러시 및 비트맵으로 완벽 복원 후 DC 삭제 (GDI 누수 원천 차단)
+    // 원래 기본 브러시 및 비트맵으로 완벽 복원 후 DC 삭제 (GDI 누수 원천 차단)
     SelectObject(hdcMem, hOldBrMem);
     SelectObject(hdcMask, hOldBrMask);
     SelectObject(hdcMem, hOldBmp);
@@ -343,12 +357,13 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     switch (msg) {
     case WM_QUERYENDSESSION:
         Logger::Log(L"[WndProc] WM_QUERYENDSESSION received. Allowing clean OS shutdown.");
-        return TRUE; // 시스템 종료 동의
+        return TRUE; // 시스템 종료 즉시 동의
 
     case WM_ENDSESSION:
         if (wParam == TRUE) {
-            Logger::Log(L"[WndProc] WM_ENDSESSION received (EndSession=TRUE). Initiating clean exit.");
-            PostQuitMessage(0); // 셧다운 차단 방지 및 클린 종료
+            Logger::Log(L"[WndProc] WM_ENDSESSION received (EndSession=TRUE). Performing synchronous clean shutdown.");
+            g_app->Cleanup();
+            PostQuitMessage(0); // 클린 탈출
         }
         return 0;
 
@@ -389,7 +404,7 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 1. 로거 초기화 (가장 먼저 실행)
     Logger::Init();
-    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.2.0 (Lean Browser-Hook Edition)...");
+    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.2.1 (Zero-Defect Clean Edition)...");
 
     // 2. 단일 인스턴스 중복 실행 방지
     m_hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
@@ -441,7 +456,7 @@ bool Application::Initialize(HINSTANCE hInstance) {
     m_browserWatcher.SetStateCallback([this](bool isConnected, const std::wstring& title) {
         this->UpdateState(isConnected, title);
     });
-    m_browserWatcher.Initialize(m_hWnd);
+    m_browserWatcher.Initialize();
 
     // 초기 브라우저 타이틀 상태 스캔 및 즉시 반영
     m_browserWatcher.CheckCurrentState();

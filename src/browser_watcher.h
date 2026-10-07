@@ -9,10 +9,10 @@ public:
     BrowserWatcher();
     ~BrowserWatcher();
 
-    bool Initialize(HWND hMainWnd);
+    bool Initialize();
     void Cleanup();
 
-    // 현재 열려 있는 브라우저 창 목록에서 초기 상태 즉시 검색
+    // 현재 열려 있는 브라우저 창 목록에서 초기 상태 검색
     bool CheckCurrentState();
 
     void SetStateCallback(std::function<void(bool isConnected, const std::wstring& title)> callback);
@@ -21,7 +21,6 @@ public:
     std::wstring GetMatchedTitle() const { return m_matchedTitle; }
 
 private:
-    HWND m_hMainWnd;
     HWINEVENTHOOK m_hHook;
     bool m_isConnected;
     bool m_hasState;
@@ -42,5 +41,6 @@ private:
 
     static BOOL CALLBACK EnumWindowsInitProc(HWND hwnd, LPARAM lParam);
 
+    static bool SafeGetWindowTitle(HWND hwnd, wchar_t* buf, int maxLen);
     void HandleTitleChange(HWND hwnd);
 };

@@ -82,17 +82,6 @@ void Logger::Log(const wchar_t* format, ...) {
     LeaveCriticalSection(&s_cs);
 }
 
-void Logger::LogA(const char* format, ...) {
-    char buf[1024];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buf, sizeof(buf), format, args);
-    va_end(args);
-
-    wchar_t wbuf[1024];
-    MultiByteToWideChar(CP_UTF8, 0, buf, -1, wbuf, 1024);
-    Log(L"%s", wbuf);
-}
 
 void Logger::OpenLogFile() {
     EnterCriticalSection(&s_cs);
