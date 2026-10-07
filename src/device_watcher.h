@@ -30,6 +30,9 @@ public:
     // 감지된 외장 키보드 목록 반환
     std::vector<KeyboardDeviceInfo> GetConnectedKeyboards();
 
+    // SetupAPI 기반 물리적 장치 존재 여부 실시간 확인 (캐시 없는 커널 레벨)
+    bool IsDevicePhysicallyPresent(const std::wstring& vid, const std::wstring& pid);
+
     // 콜백 등록
     void SetStateCallback(std::function<void(bool isConnected, const std::wstring& targetName)> callback);
 
@@ -59,6 +62,11 @@ private:
     size_t m_baselineCount;
     bool m_baselineEstablished;
 
+    // 자동 감지 시 잠금된 타겟 VID/PID
+    std::wstring m_autoLockedVid;
+    std::wstring m_autoLockedPid;
+
     static KeyboardDeviceInfo ParseDevicePath(const std::wstring& path);
     void EvaluateState(const wchar_t* triggerReason);
+    void UpdateStateInternal(bool isConnected, const std::wstring& reason, const std::wstring& name);
 };

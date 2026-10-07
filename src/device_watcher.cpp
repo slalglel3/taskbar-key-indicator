@@ -1,6 +1,7 @@
 #include "device_watcher.h"
 #include "logger.h"
 #include <dbt.h>
+#include <setupapi.h>
 #include <initguid.h>
 #include <algorithm>
 
@@ -45,7 +46,6 @@ bool DeviceWatcher::Initialize(HWND hWnd) {
         Logger::Log(L"[Device] RegisterDeviceNotification failed! Error: %lu", GetLastError());
     }
 
-    // 초기 상태 평가 및 베이스라인 수립
     ResetBaseline();
     return true;
 }
@@ -88,6 +88,55 @@ KeyboardDeviceInfo DeviceWatcher::ParseDevicePath(const std::wstring& path) {
     }
 
     return info;
+}
+
+bool DeviceWatcher::IsDevicePhysicallyPresent(const std::wstring& vid, const std::wstring& pid) {
+    if (vid.empty() || pid.empty()) return false;
+
+    std::wstring uVid = vid;
+    std::wstring uPid = pid;
+    std::transform(uVid.begin(), uVid.end(), uVid.begin(), ::towupper);
+    std::transform(uPid.begin(), uPid.end(), uPid.begin(), ::towupper);
+
+    // SetupAPI DIGCF_PRESENT: Windows 하드웨어 관리자와 동일한 물리적 실재성 실시간 검사
+    HDEVINFO hDevInfo = SetupDiGetClassDevsW(
+        &GUID_DEVINTERFACE_HID_LOCAL,
+        NULL,
+        NULL,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
+    );
+
+    if (hDevInfo == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    SP_DEVICE_INTERFACE_DATA ifData = { sizeof(SP_DEVICE_INTERFACE_DATA) };
+    bool found = false;
+
+    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &GUID_DEVINTERFACE_HID_LOCAL, i, &ifData); ++i) {
+        DWORD reqSize = 0;
+        SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifData, NULL, 0, &reqSize, NULL);
+        if (reqSize > 0) {
+            std::vector<BYTE> buf(reqSize);
+            PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)buf.data();
+            detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+
+            if (SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifData, detail, reqSize, NULL, NULL)) {
+                std::wstring path = detail->DevicePath;
+                std::wstring upper = path;
+                std::transform(upper.begin(), upper.end(), upper.begin(), ::towupper);
+
+                if (upper.find(L"VID_" + uVid) != std::wstring::npos &&
+                    upper.find(L"PID_" + uPid) != std::wstring::npos) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    SetupDiDestroyDeviceInfoList(hDevInfo);
+    return found;
 }
 
 std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
@@ -142,107 +191,36 @@ void DeviceWatcher::ResetBaseline() {
     m_baselineCount = externalKbs.size();
     m_baselineEstablished = true;
 
+    if (!externalKbs.empty()) {
+        m_autoLockedVid = externalKbs[0].vid;
+        m_autoLockedPid = externalKbs[0].pid;
+    } else {
+        m_autoLockedVid.clear();
+        m_autoLockedPid.clear();
+    }
+
     Logger::Log(L"[Device] === Baseline Reset Established ===");
-    Logger::Log(L"[Device] Baseline external keyboard count: %zu", m_baselineCount);
+    Logger::Log(L"[Device] Baseline external count: %zu (Auto-locked Target: VID_%s PID_%s)",
+        m_baselineCount, m_autoLockedVid.c_str(), m_autoLockedPid.c_str());
+
     for (size_t i = 0; i < externalKbs.size(); ++i) {
         Logger::Log(L"[Device]   Baseline [%zu]: VID_%s PID_%s (%s)",
-            i, externalKbs[i].vid.c_str(), externalKbs[i].pid.c_str(), externalKbs[i].devicePath.c_str());
+            i, externalKbs[i].vid.c_str(), externalKbs[i].pid.c_str(), externalKbs[i].friendlyName.c_str());
     }
 
     EvaluateState(L"Baseline Reset");
 }
 
-void DeviceWatcher::EvaluateState(const wchar_t* triggerReason) {
-    std::vector<KeyboardDeviceInfo> keyboards = GetConnectedKeyboards();
-    std::vector<KeyboardDeviceInfo> externalKbs;
-    for (const auto& kb : keyboards) {
-        if (kb.isExternal) externalKbs.push_back(kb);
-    }
-
-    bool newState = false;
-    std::wstring matchedName = L"";
-
-    // 1. 특정 VID / PID 지정 모드
-    if (!m_targetVid.empty() && !m_targetPid.empty()) {
-        std::wstring uTargetVid = m_targetVid;
-        std::wstring uTargetPid = m_targetPid;
-        std::transform(uTargetVid.begin(), uTargetVid.end(), uTargetVid.begin(), ::towupper);
-        std::transform(uTargetPid.begin(), uTargetPid.end(), uTargetPid.begin(), ::towupper);
-
-        for (const auto& kb : keyboards) {
-            if (kb.vid == uTargetVid && kb.pid == uTargetPid) {
-                newState = true;
-                matchedName = kb.friendlyName;
-                break;
-            }
-        }
-
-        if (!newState) {
-            matchedName = L"Target VID:" + m_targetVid + L" PID:" + m_targetPid + L" [Disconnected]";
-        }
-    }
-    // 2. 스마트 베이스라인 자동 감지 모드
-    else {
-        if (!m_baselineEstablished) {
-            m_baselineKeyboards = externalKbs;
-            m_baselineCount = externalKbs.size();
-            m_baselineEstablished = true;
-        }
-
-        // 새 장치가 꽂혀서 수량이 늘어난 경우 베이스라인을 상향 갱신
-        if (externalKbs.size() > m_baselineCount) {
-            Logger::Log(L"[Device] New keyboard plugged! Upgrading baseline from %zu to %zu",
-                m_baselineCount, externalKbs.size());
-            m_baselineCount = externalKbs.size();
-            m_baselineKeyboards = externalKbs;
-        }
-
-        // [핵심] 베이스라인 수량과 비교:
-        // PC에 마우스 동글(1개) + 멀티페어링 키보드(1개) = 총 2개였던 경우,
-        // 키보드를 모바일로 넘겨서 1개로 줄어들면 즉시 DISCONNECTED 판별!
-        if (m_baselineCount > 0 && externalKbs.size() < m_baselineCount) {
-            newState = false;
-
-            // 어떤 장치가 사라졌는지 식별
-            std::wstring missingDesc = L"";
-            for (const auto& bKb : m_baselineKeyboards) {
-                bool stillPresent = false;
-                for (const auto& cKb : externalKbs) {
-                    if (cKb.vid == bKb.vid && cKb.pid == bKb.pid) {
-                        stillPresent = true;
-                        break;
-                    }
-                }
-                if (!stillPresent) {
-                    missingDesc += L"[VID:" + bKb.vid + L" PID:" + bKb.pid + L"] ";
-                }
-            }
-
-            matchedName = L"Keyboard Disconnected: " + (missingDesc.empty() ? L"Wireless Active" : missingDesc);
-        } else {
-            // 베이스라인 수량 유지 또는 이상
-            newState = !externalKbs.empty();
-            if (!externalKbs.empty()) {
-                matchedName = externalKbs[0].friendlyName;
-                if (externalKbs.size() > 1) {
-                    matchedName += L" (Total " + std::to_wstring(externalKbs.size()) + L")";
-                }
-            } else {
-                matchedName = L"No External Keyboard Detected";
-            }
-        }
-    }
-
-    // 상태 또는 이름에 변동이 있을 때만 로깅 및 콜백 호출
-    if (newState != m_isTargetConnected || matchedName != m_currentTargetName) {
-        Logger::Log(L"[Device] State Changed (%s): %s -> %s (Target: %s)",
-            triggerReason,
+void DeviceWatcher::UpdateStateInternal(bool isConnected, const std::wstring& reason, const std::wstring& name) {
+    if (isConnected != m_isTargetConnected || name != m_currentTargetName) {
+        Logger::Log(L"[Device] *** STATE TRANSITION *** (%s): %s -> %s (Target: %s)",
+            reason.c_str(),
             m_isTargetConnected ? L"CONNECTED" : L"DISCONNECTED",
-            newState ? L"CONNECTED" : L"DISCONNECTED",
-            matchedName.c_str());
+            isConnected ? L"CONNECTED" : L"DISCONNECTED",
+            name.c_str());
 
-        m_isTargetConnected = newState;
-        m_currentTargetName = matchedName;
+        m_isTargetConnected = isConnected;
+        m_currentTargetName = name;
 
         if (m_callback) {
             m_callback(m_isTargetConnected, m_currentTargetName);
@@ -256,9 +234,78 @@ void DeviceWatcher::OnDeviceChange(WPARAM wParam, LPARAM lParam) {
     else if (wParam == DBT_DEVICEREMOVECOMPLETE) evtName = L"DBT_DEVICEREMOVECOMPLETE";
     else if (wParam == DBT_DEVNODES_CHANGED) evtName = L"DBT_DEVNODES_CHANGED";
 
-    if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE || wParam == DBT_DEVNODES_CHANGED) {
-        Logger::Log(L"[PnP] WM_DEVICECHANGE: %s", evtName);
-        EvaluateState(evtName);
+    Logger::Log(L"[PnP] WM_DEVICECHANGE: %s (wParam: 0x%IX)", evtName, (UINT_PTR)wParam);
+
+    // [핵심] 권위적(Authoritative) PnP 이벤트 즉결 처리
+    if (lParam) {
+        DEV_BROADCAST_HDR* hdr = (DEV_BROADCAST_HDR*)lParam;
+        if (hdr->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE) {
+            DEV_BROADCAST_DEVICEINTERFACE_W* di = (DEV_BROADCAST_DEVICEINTERFACE_W*)lParam;
+            KeyboardDeviceInfo evInfo = ParseDevicePath(di->dbcc_name);
+
+            Logger::Log(L"[PnP]   Target Path: %s (Parsed VID_%s PID_%s, External=%s)",
+                di->dbcc_name, evInfo.vid.c_str(), evInfo.pid.c_str(), evInfo.isExternal ? L"YES" : L"NO");
+
+            std::wstring activeVid = (!m_targetVid.empty()) ? m_targetVid : m_autoLockedVid;
+            std::wstring activePid = (!m_targetPid.empty()) ? m_targetPid : m_autoLockedPid;
+
+            bool matchesTarget = (!activeVid.empty() && !activePid.empty() &&
+                                  evInfo.vid == activeVid && evInfo.pid == activePid);
+
+            // 타겟 장치가 명시적으로 분리되었을 때 -> 0ms 즉시 DISCONNECTED!
+            if (wParam == DBT_DEVICEREMOVECOMPLETE) {
+                if (matchesTarget || evInfo.isExternal) {
+                    std::wstring desc = L"Keyboard Disconnected: [VID:" + evInfo.vid + L" PID:" + evInfo.pid + L"]";
+                    UpdateStateInternal(false, L"Authoritative PnP Removed", desc);
+                    return;
+                }
+            }
+            // 타겟 장치가 명시적으로 다시 연결되었을 때 -> 0ms 즉시 CONNECTED!
+            else if (wParam == DBT_DEVICEARRIVAL) {
+                if (matchesTarget || evInfo.isExternal) {
+                    if (m_autoLockedVid.empty() && !evInfo.vid.empty()) {
+                        m_autoLockedVid = evInfo.vid;
+                        m_autoLockedPid = evInfo.pid;
+                    }
+                    std::wstring desc = L"Keyboard Connected: [VID:" + evInfo.vid + L" PID:" + evInfo.pid + L"]";
+                    UpdateStateInternal(true, L"Authoritative PnP Arrived", desc);
+                    return;
+                }
+            }
+        }
+    }
+
+    EvaluateState(evtName);
+}
+
+void DeviceWatcher::EvaluateState(const wchar_t* triggerReason) {
+    std::wstring activeVid = (!m_targetVid.empty()) ? m_targetVid : m_autoLockedVid;
+    std::wstring activePid = (!m_targetPid.empty()) ? m_targetPid : m_autoLockedPid;
+
+    // 타겟 VID/PID가 결정되어 있는 경우 -> SetupAPI 커널 물리 존재 여부 1:1 확인
+    if (!activeVid.empty() && !activePid.empty()) {
+        bool physicallyPresent = IsDevicePhysicallyPresent(activeVid, activePid);
+        std::wstring name = physicallyPresent
+            ? (L"Keyboard (VID:" + activeVid + L" PID:" + activePid + L")")
+            : (L"Target VID:" + activeVid + L" PID:" + activePid + L" [Disconnected]");
+
+        UpdateStateInternal(physicallyPresent, triggerReason, name);
+        return;
+    }
+
+    // 타겟이 아직 없는 경우 -> RawInput 및 SetupAPI 폴백
+    std::vector<KeyboardDeviceInfo> keyboards = GetConnectedKeyboards();
+    std::vector<KeyboardDeviceInfo> externalKbs;
+    for (const auto& kb : keyboards) {
+        if (kb.isExternal) externalKbs.push_back(kb);
+    }
+
+    if (!externalKbs.empty()) {
+        m_autoLockedVid = externalKbs[0].vid;
+        m_autoLockedPid = externalKbs[0].pid;
+        UpdateStateInternal(true, triggerReason, externalKbs[0].friendlyName);
+    } else {
+        UpdateStateInternal(false, triggerReason, L"No External Keyboard Detected");
     }
 }
 

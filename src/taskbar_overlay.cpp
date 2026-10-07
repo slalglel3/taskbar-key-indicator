@@ -152,7 +152,8 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
                 L"",
                 style,
                 0, 0, 0, 0,
-                NULL, NULL, m_hInstance, this
+                hTray, // [핵심] 작업표시줄을 소유자(Owner)로 지정 -> 작업표시줄 클릭 시에도 무조건 위에 표시!
+                NULL, m_hInstance, this
             );
 
             if (hOverlay) {

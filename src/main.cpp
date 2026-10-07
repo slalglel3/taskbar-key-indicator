@@ -426,6 +426,9 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     case WM_TIMER:
         if (wParam == TIMER_WATCHDOG) {
             g_app->m_deviceWatcher.CheckConnectionState();
+            if (g_app->m_overlayMgr.IsOverlayVisible()) {
+                g_app->m_overlayMgr.UpdatePositions();
+            }
             return 0;
         }
         break;
