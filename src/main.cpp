@@ -230,7 +230,7 @@ void Application::ShowContextMenu() {
     // 2. 진단 및 테스트 기능 (핵심!)
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_PROBE_DIAGNOSTIC, L"🔬 5대 센서 하드웨어 정밀 진단 실행");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_PROBE_DIAGNOSTIC, L"🔬 5대 센서 & HID 패킷 심층 진단 실행");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_RESET_BASELINE, L"🔄 현재 연결 상태를 기준(Baseline)으로 재설정");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);

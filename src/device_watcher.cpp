@@ -3,6 +3,8 @@
 #include <dbt.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <hidsdi.h>
+#include <hidpi.h>
 #include <initguid.h>
 #include <algorithm>
 
@@ -23,7 +25,6 @@ DeviceWatcher::DeviceWatcher()
     , m_baselineEstablished(false)
     , m_hasLastProbe(false)
 {
-    memset(&m_lastProbe, 0, sizeof(m_lastProbe));
 }
 
 DeviceWatcher::~DeviceWatcher() {
@@ -148,7 +149,7 @@ std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
 }
 
 DeviceProbeResult DeviceWatcher::ProbeTargetDevice(bool logDetailed) {
-    DeviceProbeResult res = { 0 };
+    DeviceProbeResult res;
     res.rawInputPresent = false;
     res.setupApiPresent = false;
     res.canOpenFile = false;
@@ -182,7 +183,8 @@ DeviceProbeResult DeviceWatcher::ProbeTargetDevice(bool logDetailed) {
         }
     }
 
-    // 2. SetupAPI & CfgMgr 센서 검사
+    // 2. SetupAPI 열거: 대상 VID/PID와 일치하는 모든 HID 인터페이스 경로 수집
+    std::vector<std::wstring> matchedPaths;
     HDEVINFO hDevInfo = SetupDiGetClassDevsW(
         &GUID_DEVINTERFACE_HID_LOCAL,
         NULL,
@@ -211,23 +213,23 @@ DeviceProbeResult DeviceWatcher::ProbeTargetDevice(bool logDetailed) {
                     if (upper.find(L"VID_" + uTargetVid) != std::wstring::npos &&
                         upper.find(L"PID_" + uTargetPid) != std::wstring::npos) {
                         res.setupApiPresent = true;
-                        res.devicePath = path;
+                        matchedPaths.push_back(path);
 
-                        // DevNode 하드웨어 상태 질의
-                        res.devNodeFound = true;
-                        ULONG status = 0, problem = 0;
-                        if (CM_Get_DevNode_Status(&status, &problem, devInfoData.DevInst, 0) == CR_SUCCESS) {
-                            res.devNodeStatus = status;
-                            res.devNodeProblem = problem;
+                        if (!res.devNodeFound) {
+                            res.devNodeFound = true;
+                            res.devicePath = path;
+
+                            ULONG status = 0, problem = 0;
+                            if (CM_Get_DevNode_Status(&status, &problem, devInfoData.DevInst, 0) == CR_SUCCESS) {
+                                res.devNodeStatus = status;
+                                res.devNodeProblem = problem;
+                            }
+
+                            wchar_t instId[MAX_DEVICE_ID_LEN] = { 0 };
+                            if (CM_Get_Device_IDW(devInfoData.DevInst, instId, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS) {
+                                res.devInstanceId = instId;
+                            }
                         }
-
-                        // 디바이스 인스턴스 ID 질의
-                        wchar_t instId[MAX_DEVICE_ID_LEN] = { 0 };
-                        if (CM_Get_Device_IDW(devInfoData.DevInst, instId, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS) {
-                            res.devInstanceId = instId;
-                        }
-
-                        break; // 대상 장치 발견
                     }
                 }
             }
@@ -235,11 +237,15 @@ DeviceProbeResult DeviceWatcher::ProbeTargetDevice(bool logDetailed) {
         SetupDiDestroyDeviceInfoList(hDevInfo);
     }
 
-    // 3. 파일 핸들 I/O 센서 검사 (DevicePath를 직접 열 수 있는지)
-    if (!res.devicePath.empty()) {
+    // 3. 수집된 모든 HID 인터페이스에 대해 저수준 HID 패킷 쿼리 프로브 실행
+    for (const auto& path : matchedPaths) {
+        HidInterfaceProbeInfo ifInfo;
+        ifInfo.path = path;
+
+        // I/O 핸들 열기 (ReadWrite 시도 후 실패 시 Query-only)
         HANDLE hFile = CreateFileW(
-            res.devicePath.c_str(),
-            0, // 쿼리 전용 (관리자 권한 불필요)
+            path.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             NULL,
             OPEN_EXISTING,
@@ -247,29 +253,127 @@ DeviceProbeResult DeviceWatcher::ProbeTargetDevice(bool logDetailed) {
             NULL
         );
 
+        if (hFile == INVALID_HANDLE_VALUE) {
+            hFile = CreateFileW(
+                path.c_str(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                NULL,
+                OPEN_EXISTING,
+                0,
+                NULL
+            );
+        }
+
         if (hFile != INVALID_HANDLE_VALUE) {
+            ifInfo.canOpen = true;
             res.canOpenFile = true;
-            res.openFileError = 0;
+
+            // (A) Attributes
+            HIDD_ATTRIBUTES attr = { sizeof(HIDD_ATTRIBUTES) };
+            if (HidD_GetAttributes(hFile, &attr)) {
+                ifInfo.attrSuccess = true;
+                ifInfo.vid = attr.VendorID;
+                ifInfo.pid = attr.ProductID;
+                ifInfo.version = attr.VersionNumber;
+            }
+
+            // (B) Preparsed Data & Caps
+            PHIDP_PREPARSED_DATA pData = NULL;
+            if (HidD_GetPreparsedData(hFile, &pData)) {
+                HIDP_CAPS caps = { 0 };
+                if (HidP_GetCaps(pData, &caps) == HIDP_STATUS_SUCCESS) {
+                    ifInfo.usagePage = caps.UsagePage;
+                    ifInfo.usage = caps.Usage;
+                    ifInfo.inputReportLen = caps.InputReportByteLength;
+                    ifInfo.outputReportLen = caps.OutputReportByteLength;
+                    ifInfo.featureReportLen = caps.FeatureReportByteLength;
+                }
+                HidD_FreePreparsedData(pData);
+            }
+
+            // (C) Strings
+            wchar_t strBuf[128] = { 0 };
+            if (HidD_GetManufacturerString(hFile, strBuf, sizeof(strBuf))) {
+                ifInfo.manufacturer = strBuf;
+            }
+            memset(strBuf, 0, sizeof(strBuf));
+            if (HidD_GetProductString(hFile, strBuf, sizeof(strBuf))) {
+                ifInfo.product = strBuf;
+            }
+
+            // (D) Feature Report Probe
+            size_t fLen = (ifInfo.featureReportLen > 0) ? ifInfo.featureReportLen : 65;
+            std::vector<BYTE> fBuf(fLen, 0);
+            fBuf[0] = 0;
+            if (HidD_GetFeature(hFile, fBuf.data(), (ULONG)fBuf.size())) {
+                ifInfo.getFeatureSuccess = true;
+                ifInfo.getFeatureError = 0;
+            } else {
+                ifInfo.getFeatureSuccess = false;
+                ifInfo.getFeatureError = GetLastError();
+            }
+
+            // (E) Input Report Probe
+            size_t inLen = (ifInfo.inputReportLen > 0) ? ifInfo.inputReportLen : 65;
+            std::vector<BYTE> inBuf(inLen, 0);
+            inBuf[0] = 0;
+            if (HidD_GetInputReport(hFile, inBuf.data(), (ULONG)inBuf.size())) {
+                ifInfo.getInputReportSuccess = true;
+                ifInfo.getInputReportError = 0;
+            } else {
+                ifInfo.getInputReportSuccess = false;
+                ifInfo.getInputReportError = GetLastError();
+            }
+
+            // (F) Output Report Probe
+            size_t outLen = (ifInfo.outputReportLen > 0) ? ifInfo.outputReportLen : 65;
+            std::vector<BYTE> outBuf(outLen, 0);
+            outBuf[0] = 0;
+            if (HidD_SetOutputReport(hFile, outBuf.data(), (ULONG)outBuf.size())) {
+                ifInfo.setOutputReportSuccess = true;
+                ifInfo.setOutputReportError = 0;
+            } else {
+                ifInfo.setOutputReportSuccess = false;
+                ifInfo.setOutputReportError = GetLastError();
+            }
+
             CloseHandle(hFile);
         } else {
-            res.canOpenFile = false;
-            res.openFileError = GetLastError();
+            ifInfo.canOpen = false;
+            ifInfo.openError = GetLastError();
+            if (res.openFileError == 0) res.openFileError = ifInfo.openError;
         }
+
+        res.hidInterfaces.push_back(ifInfo);
     }
 
     if (logDetailed) {
         Logger::Log(L"============================================================");
         Logger::Log(L"[Diagnostic Probe] Target: VID_%s PID_%s", uTargetVid.c_str(), uTargetPid.c_str());
         Logger::Log(L"  - Sensor 1 (RawInput Present) : %s", res.rawInputPresent ? L"YES" : L"NO");
-        Logger::Log(L"  - Sensor 2 (SetupAPI Present) : %s", res.setupApiPresent ? L"YES" : L"NO");
+        Logger::Log(L"  - Sensor 2 (SetupAPI Present) : %s (Found %zu Interface(s))",
+            res.setupApiPresent ? L"YES" : L"NO", res.hidInterfaces.size());
         Logger::Log(L"  - Sensor 3 (Device Node Found): %s (Status: 0x%08X, Problem: %lu)",
             res.devNodeFound ? L"YES" : L"NO", res.devNodeStatus, res.devNodeProblem);
-        Logger::Log(L"  - Sensor 4 (Can Open Handle)  : %s (Error Code: %lu)",
+        Logger::Log(L"  - Sensor 4 (Can Open Any Hndl): %s (Last Error: %lu)",
             res.canOpenFile ? L"YES" : L"NO", res.openFileError);
         Logger::Log(L"  - Device Instance ID         : %s",
             res.devInstanceId.empty() ? L"(None)" : res.devInstanceId.c_str());
-        Logger::Log(L"  - Active Device Path          : %s",
-            res.devicePath.empty() ? L"(None)" : res.devicePath.c_str());
+
+        Logger::Log(L"--- [Sensor 5: Exhaustive HID Packet Probes] ---");
+        for (size_t i = 0; i < res.hidInterfaces.size(); ++i) {
+            const auto& ifc = res.hidInterfaces[i];
+            Logger::Log(L"  [HID #%zu] UsagePage=0x%04X, Usage=0x%04X | Lens: In=%u, Out=%u, Feat=%u",
+                i + 1, ifc.usagePage, ifc.usage, ifc.inputReportLen, ifc.outputReportLen, ifc.featureReportLen);
+            Logger::Log(L"         Open=%s(Err=%lu), Strings: Mfr='%s', Prod='%s'",
+                ifc.canOpen ? L"OK" : L"FAIL", ifc.openError,
+                ifc.manufacturer.c_str(), ifc.product.c_str());
+            Logger::Log(L"         GetFeature=%s(Err=%lu) | GetInput=%s(Err=%lu) | SetOutput=%s(Err=%lu)",
+                ifc.getFeatureSuccess ? L"OK" : L"FAIL", ifc.getFeatureError,
+                ifc.getInputReportSuccess ? L"OK" : L"FAIL", ifc.getInputReportError,
+                ifc.setOutputReportSuccess ? L"OK" : L"FAIL", ifc.setOutputReportError);
+        }
         Logger::Log(L"============================================================");
     }
 

@@ -17,7 +17,7 @@ zig c++ -target x86_64-windows-gnu \
     src/logger.cpp \
     src/taskbar_overlay.cpp \
     src/device_watcher.cpp \
-    -luser32 -lgdi32 -lshell32 -lshlwapi -ladvapi32 -lsetupapi \
+    -luser32 -lgdi32 -lshell32 -lshlwapi -ladvapi32 -lsetupapi -lhid \
     -o dist/TaskbarKeyIndicator.exe
 
 echo "Build successful: dist/TaskbarKeyIndicator.exe"

@@ -13,17 +13,48 @@ struct KeyboardDeviceInfo {
     bool isExternal;
 };
 
-// 5대 센서 정밀 진단 결과 구조체
+struct HidInterfaceProbeInfo {
+    std::wstring path;
+    USHORT usagePage = 0;
+    USHORT usage = 0;
+    USHORT inputReportLen = 0;
+    USHORT outputReportLen = 0;
+    USHORT featureReportLen = 0;
+
+    bool canOpen = false;
+    DWORD openError = 0;
+
+    bool attrSuccess = false;
+    USHORT vid = 0;
+    USHORT pid = 0;
+    USHORT version = 0;
+
+    std::wstring manufacturer;
+    std::wstring product;
+
+    bool getFeatureSuccess = false;
+    DWORD getFeatureError = 0;
+
+    bool getInputReportSuccess = false;
+    DWORD getInputReportError = 0;
+
+    bool setOutputReportSuccess = false;
+    DWORD setOutputReportError = 0;
+};
+
+// 5대 센서 + HID 심층 패킷 진단 결과 구조체
 struct DeviceProbeResult {
-    bool rawInputPresent;       // 센서 1: RawInput 목록에 존재하는가
-    bool setupApiPresent;       // 센서 2: SetupAPI DIGCF_PRESENT에 존재하는가
-    bool canOpenFile;           // 센서 3: CreateFile로 핸들을 열 수 있는가
-    DWORD openFileError;        // 센서 3 에러 코드
-    bool devNodeFound;          // 센서 4: DevNode 찾음 여부
-    ULONG devNodeStatus;        // 센서 4: CM_Get_DevNode_Status 상태 플래그
-    ULONG devNodeProblem;       // 센서 4: CM_Get_DevNode_Status 문제 코드
-    std::wstring devInstanceId; // 디바이스 인스턴스 ID
-    std::wstring devicePath;    // 디바이스 경로
+    bool rawInputPresent = false;       // 센서 1: RawInput 목록에 존재하는가
+    bool setupApiPresent = false;       // 센서 2: SetupAPI DIGCF_PRESENT에 존재하는가
+    bool canOpenFile = false;           // 센서 3: CreateFile로 핸들을 열 수 있는가
+    DWORD openFileError = 0;            // 센서 3 에러 코드
+    bool devNodeFound = false;          // 센서 4: DevNode 찾음 여부
+    ULONG devNodeStatus = 0;            // 센서 4: CM_Get_DevNode_Status 상태 플래그
+    ULONG devNodeProblem = 0;           // 센서 4: CM_Get_DevNode_Status 문제 코드
+    std::wstring devInstanceId;         // 디바이스 인스턴스 ID
+    std::wstring devicePath;            // 주 디바이스 경로
+
+    std::vector<HidInterfaceProbeInfo> hidInterfaces; // 센서 5: 각 HID 인터페이스별 심층 프로브
 };
 
 class DeviceWatcher {
