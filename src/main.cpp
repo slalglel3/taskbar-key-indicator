@@ -12,6 +12,7 @@
 static const wchar_t* MAIN_WINDOW_CLASS = L"TaskbarKeyIndicator_MsgWnd";
 static const wchar_t* MUTEX_NAME = L"TaskbarKeyIndicator_SingleInstance_Mutex";
 static const UINT WM_TRAYICON_MSG = WM_APP + 101;
+static const UINT_PTR TIMER_WATCHDOG = 3001;
 
 // 메뉴 ID 상수
 enum MenuIDs {
@@ -20,6 +21,7 @@ enum MenuIDs {
     IDM_SEPARATOR_1,
     IDM_TEST_OVERLAY,
     IDM_OPEN_LOG,
+    IDM_RESET_BASELINE,
     IDM_SEPARATOR_2,
     IDM_AUTO_DETECT_KB,
     IDM_KB_LIST_BASE = 2000, // 감지된 개별 키보드 선택 메뉴 (동적 2000 ~ 2099)
@@ -84,7 +86,6 @@ Application::Application()
     memset(&m_nid, 0, sizeof(m_nid));
     g_app = this;
 }
-
 Application::~Application() {
     Logger::Log(L"[App] Shutting down application...");
     if (m_hCurrentTrayIcon) {
@@ -92,6 +93,9 @@ Application::~Application() {
         m_hCurrentTrayIcon = NULL;
     }
     Shell_NotifyIconW(NIM_DELETE, &m_nid);
+    if (m_hWnd) {
+        KillTimer(m_hWnd, TIMER_WATCHDOG);
+    }
     if (m_hMutex) {
         CloseHandle(m_hMutex);
         m_hMutex = NULL;
@@ -225,6 +229,7 @@ void Application::ShowContextMenu() {
     // 2. 진단 및 테스트 기능 (핵심!)
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_RESET_BASELINE, L"🔄 현재 연결 상태를 기준(Baseline)으로 재설정");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
 
@@ -307,6 +312,10 @@ void Application::ShowContextMenu() {
 
     case IDM_OPEN_LOG:
         Logger::OpenLogFile();
+        break;
+
+    case IDM_RESET_BASELINE:
+        m_deviceWatcher.ResetBaseline();
         break;
 
     case IDM_AUTO_DETECT_KB:
@@ -414,6 +423,13 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         return 0;
 
+    case WM_TIMER:
+        if (wParam == TIMER_WATCHDOG) {
+            g_app->m_deviceWatcher.CheckConnectionState();
+            return 0;
+        }
+        break;
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -421,6 +437,7 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+    return 0;
 }
 
 bool Application::Initialize(HINSTANCE hInstance) {
@@ -492,6 +509,9 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 8. 초기 상태 즉시 반영
     UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+
+    // 9. 1초 주기 경량 워치독 타이머 시작 (PnP 누락/지연 방지 안전망)
+    SetTimer(m_hWnd, TIMER_WATCHDOG, 1000, NULL);
 
     Logger::Log(L"[App] Initialization completed successfully.");
     return true;

@@ -1,6 +1,7 @@
 #include "taskbar_overlay.h"
 #include "logger.h"
 #include <algorithm>
+#include <cstdint>
 
 static const wchar_t* OVERLAY_CLASS_NAME = L"TaskbarLedOverlayClass";
 static const UINT_PTR TIMER_TEST_RESTORE = 2001;
@@ -18,6 +19,15 @@ static COLORREF Lighten(COLORREF c, float amount) {
 
 static COLORREF Darken(COLORREF c, float amount) {
     return BlendColor(c, RGB(0, 0, 0), amount);
+}
+
+// 32비트 ARGB 프리멀티플라이드 픽셀 생성
+static inline uint32_t MakePremultipliedArgb(BYTE r, BYTE g, BYTE b, BYTE a) {
+    float f = a / 255.0f;
+    BYTE pr = (BYTE)(r * f);
+    BYTE pg = (BYTE)(g * f);
+    BYTE pb = (BYTE)(b * f);
+    return ((uint32_t)a << 24) | ((uint32_t)pr << 16) | ((uint32_t)pg << 8) | (uint32_t)pb;
 }
 
 TaskbarOverlayManager::TaskbarOverlayManager()
@@ -131,11 +141,9 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
             }
         }
         if (!exists) {
-            // WS_EX_TRANSPARENT: 클릭 100% 하위 통과
-            // WS_EX_TOOLWINDOW: 작업표시줄/Alt+Tab 제외
-            // WS_EX_TOPMOST: 최상위 Z-order
-            // WS_EX_NOACTIVATE: 포커스 빼앗지 않음
-            DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+            // [핵심] WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST
+            // DWM 독립 컴포지션 서피스를 사용하여 작업표시줄 클릭 시에도 0.0001초도 지워지지 않음!
+            DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED;
             DWORD style = WS_POPUP;
 
             HWND hOverlay = CreateWindowExW(
@@ -154,7 +162,7 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
                 info.hTargetTray = hTray;
                 info.isPrimary = (hTray == hPrimaryTray);
                 m_overlays.push_back(info);
-                Logger::Log(L"[Overlay] Created overlay HWND: %p for Tray: %p", hOverlay, hTray);
+                Logger::Log(L"[Overlay] Created layered overlay HWND: %p for Tray: %p", hOverlay, hTray);
             } else {
                 Logger::Log(L"[Overlay] Failed to create overlay window! Error: %lu", GetLastError());
             }
@@ -162,6 +170,102 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
     }
 
     UpdatePositions();
+}
+
+void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, int w, int h, COLORREF color, bool isHorizontal) {
+    if (w <= 0 || h <= 0) return;
+
+    BITMAPINFO bi = { 0 };
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h; // Top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    HBITMAP hBmp = CreateDIBSection(hdcMem, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    HBITMAP hOldBmp = (HBITMAP)SelectObject(hdcMem, hBmp);
+
+    if (pBits) {
+        uint32_t* pixels = (uint32_t*)pBits;
+
+        if (isHorizontal) {
+            for (int row = 0; row < h; ++row) {
+                COLORREF lineCol;
+                BYTE alpha = 255;
+                if (row == 0) {
+                    lineCol = Lighten(color, 0.50f); // 코어 하이라이트
+                    alpha = 255;
+                } else if (row == 1) {
+                    lineCol = Lighten(color, 0.15f); // 메인 네온 바
+                    alpha = 255;
+                } else if (row == h - 1) {
+                    lineCol = Darken(color, 0.20f);  // 소프트 글로우
+                    alpha = 220;
+                } else {
+                    lineCol = color;
+                    alpha = 240;
+                }
+
+                uint32_t pixelValue = MakePremultipliedArgb(
+                    GetRValue(lineCol),
+                    GetGValue(lineCol),
+                    GetBValue(lineCol),
+                    alpha
+                );
+
+                int rowStart = row * w;
+                for (int col = 0; col < w; ++col) {
+                    pixels[rowStart + col] = pixelValue;
+                }
+            }
+        } else {
+            for (int col = 0; col < w; ++col) {
+                COLORREF lineCol;
+                BYTE alpha = 255;
+                if (col == 0) {
+                    lineCol = Lighten(color, 0.50f);
+                    alpha = 255;
+                } else if (col == 1) {
+                    lineCol = Lighten(color, 0.15f);
+                    alpha = 255;
+                } else if (col == w - 1) {
+                    lineCol = Darken(color, 0.20f);
+                    alpha = 220;
+                } else {
+                    lineCol = color;
+                    alpha = 240;
+                }
+
+                uint32_t pixelValue = MakePremultipliedArgb(
+                    GetRValue(lineCol),
+                    GetGValue(lineCol),
+                    GetBValue(lineCol),
+                    alpha
+                );
+
+                for (int row = 0; row < h; ++row) {
+                    pixels[row * w + col] = pixelValue;
+                }
+            }
+        }
+
+        POINT ptDst = { x, y };
+        POINT ptSrc = { 0, 0 };
+        SIZE sizeWnd = { w, h };
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+
+        // [핵심] UpdateLayeredWindow 호출로 DWM 하드웨어 서피스에 비트맵 직접 전송
+        UpdateLayeredWindow(hOverlay, hdcScreen, &ptDst, &sizeWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
+    }
+
+    SelectObject(hdcMem, hOldBmp);
+    DeleteObject(hBmp);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
 }
 
 void TaskbarOverlayManager::UpdatePositions() {
@@ -183,6 +287,7 @@ void TaskbarOverlayManager::UpdatePositions() {
         int y = rcTray.top;
         int w = trayWidth;
         int h = m_thickness;
+        bool isHorizontal = true;
 
         if (trayWidth >= trayHeight) {
             // 가로형 작업표시줄
@@ -191,14 +296,15 @@ void TaskbarOverlayManager::UpdatePositions() {
             GetMonitorInfoW(hMon, &mi);
 
             if (rcTray.top <= mi.rcMonitor.top + 10) {
-                // 작업표시줄이 상단인 경우 -> 하단 테두리에 배치
+                // 상단 작업표시줄
                 y = rcTray.bottom - m_thickness;
             } else {
-                // 작업표시줄이 하단인 경우 -> 상단 테두리에 배치
+                // 하단 작업표시줄 (기본): 작업표시줄 상단 테두리에 완벽 밀착
                 y = rcTray.top;
             }
             w = trayWidth;
             h = m_thickness;
+            isHorizontal = true;
         } else {
             // 세로형 작업표시줄
             HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
@@ -212,22 +318,20 @@ void TaskbarOverlayManager::UpdatePositions() {
             }
             w = m_thickness;
             h = trayHeight;
+            isHorizontal = false;
         }
 
-        Logger::Log(L"[Overlay] Pos: x=%d, y=%d, w=%d, h=%d, Visible=%s (Tray: %d,%d - %d,%d)",
-            x, y, w, h, visible ? L"TRUE" : L"FALSE",
-            rcTray.left, rcTray.top, rcTray.right, rcTray.bottom);
-
-        SetWindowPos(
-            info.hOverlay,
-            HWND_TOPMOST,
-            x, y, w, h,
-            SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW)
-        );
-
         if (visible) {
-            InvalidateRect(info.hOverlay, NULL, TRUE);
-            UpdateWindow(info.hOverlay);
+            // DWM 레이어드 윈도우 비트맵 전송 및 위치 갱신
+            RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal);
+            SetWindowPos(
+                info.hOverlay,
+                HWND_TOPMOST,
+                x, y, w, h,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW
+            );
+        } else {
+            ShowWindow(info.hOverlay, SW_HIDE);
         }
     }
 }
@@ -260,11 +364,7 @@ void TaskbarOverlayManager::SetThickness(int thickness) {
 
 void TaskbarOverlayManager::SetColor(COLORREF color) {
     m_currentColor = color;
-    for (auto& info : m_overlays) {
-        if (info.hOverlay && IsWindow(info.hOverlay)) {
-            InvalidateRect(info.hOverlay, NULL, TRUE);
-        }
-    }
+    UpdatePositions();
 }
 
 void TaskbarOverlayManager::ForceShowTest(int durationMs) {
@@ -274,46 +374,6 @@ void TaskbarOverlayManager::ForceShowTest(int durationMs) {
 
     if (!m_overlays.empty() && m_overlays[0].hOverlay) {
         SetTimer(m_overlays[0].hOverlay, TIMER_TEST_RESTORE, durationMs, NULL);
-    }
-}
-
-void TaskbarOverlayManager::DrawNeonLedBar(HDC hdc, int width, int height, COLORREF baseColor, bool isHorizontal) {
-    if (isHorizontal) {
-        for (int y = 0; y < height; ++y) {
-            COLORREF lineCol;
-            if (y == 0) {
-                lineCol = Lighten(baseColor, 0.50f); // 최상단 밝은 네온 코어
-            } else if (y == 1) {
-                lineCol = Lighten(baseColor, 0.20f); // 중간 발광 라인
-            } else if (y == height - 1) {
-                lineCol = Darken(baseColor, 0.20f);  // 하단 소프트 섀도우
-            } else {
-                lineCol = baseColor;
-            }
-
-            HBRUSH hBrush = CreateSolidBrush(lineCol);
-            RECT r = { 0, y, width, y + 1 };
-            FillRect(hdc, &r, hBrush);
-            DeleteObject(hBrush);
-        }
-    } else {
-        for (int x = 0; x < width; ++x) {
-            COLORREF lineCol;
-            if (x == 0) {
-                lineCol = Lighten(baseColor, 0.50f);
-            } else if (x == 1) {
-                lineCol = Lighten(baseColor, 0.20f);
-            } else if (x == width - 1) {
-                lineCol = Darken(baseColor, 0.20f);
-            } else {
-                lineCol = baseColor;
-            }
-
-            HBRUSH hBrush = CreateSolidBrush(lineCol);
-            RECT r = { x, 0, x + 1, height };
-            FillRect(hdc, &r, hBrush);
-            DeleteObject(hBrush);
-        }
     }
 }
 
@@ -331,41 +391,11 @@ LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wPar
         }
         break;
 
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-
-        if (w > 0 && h > 0) {
-            HDC memDC = CreateCompatibleDC(hdc);
-            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
-            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
-
-            COLORREF color = pThis ? pThis->m_currentColor : RGB(255, 45, 85);
-            bool isHorizontal = (w >= h);
-            DrawNeonLedBar(memDC, w, h, color, isHorizontal);
-
-            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
-
-            SelectObject(memDC, oldBmp);
-            DeleteObject(memBmp);
-            DeleteDC(memDC);
-        }
-
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    case WM_ERASEBKGND:
-        return 1;
     case WM_NCHITTEST:
-        return HTTRANSPARENT; // 마우스 클릭 100% 투과
+        return HTTRANSPARENT; // 마우스 클릭 100% 하위 통과
+
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     return 0;
 }
-

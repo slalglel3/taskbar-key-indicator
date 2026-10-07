@@ -36,6 +36,7 @@ public:
     // 타겟 VID/PID 설정
     void SetTarget(const std::wstring& vid, const std::wstring& pid, const std::wstring& name = L"");
     void SetAutoDetect(bool autoDetect);
+    void ResetBaseline();
 
     bool IsTargetConnected() const { return m_isTargetConnected; }
     std::wstring GetCurrentTargetName() const { return m_currentTargetName; }
@@ -53,8 +54,10 @@ private:
     bool m_autoDetect;
     std::function<void(bool, const std::wstring&)> m_callback;
 
-    // 직전 연결된 키보드 목록 (차이점 감지용)
-    std::vector<KeyboardDeviceInfo> m_lastKnownKeyboards;
+    // 베이스라인 키보드 목록 및 수량 추적
+    std::vector<KeyboardDeviceInfo> m_baselineKeyboards;
+    size_t m_baselineCount;
+    bool m_baselineEstablished;
 
     static KeyboardDeviceInfo ParseDevicePath(const std::wstring& path);
     void EvaluateState(const wchar_t* triggerReason);

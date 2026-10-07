@@ -35,6 +35,6 @@ private:
     int m_thickness;
 
     void CreateOrUpdateOverlays();
+    void RenderLayeredOverlay(HWND hOverlay, int x, int y, int w, int h, COLORREF color, bool isHorizontal);
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    static void DrawNeonLedBar(HDC hdc, int width, int height, COLORREF baseColor, bool isHorizontal);
 };
