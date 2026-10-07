@@ -382,6 +382,12 @@ LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wPar
     TaskbarOverlayManager* pThis = (TaskbarOverlayManager*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
     switch (msg) {
+    case WM_QUERYENDSESSION:
+        return TRUE; // OS 시스템 종료 승인
+
+    case WM_ENDSESSION:
+        return 0;
+
     case WM_TIMER:
         if (wParam == TIMER_TEST_RESTORE && pThis) {
             KillTimer(hwnd, TIMER_TEST_RESTORE);

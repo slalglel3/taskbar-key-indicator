@@ -2,11 +2,14 @@
 #include "logger.h"
 #include <dbt.h>
 #include <setupapi.h>
+#include <cfgmgr32.h>
 #include <initguid.h>
 #include <algorithm>
 
 DEFINE_GUID(GUID_DEVINTERFACE_HID_LOCAL, 0x4D1E55B2, 0xF16F, 0x11CF, 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30);
+DEFINE_GUID(GUID_DEVINTERFACE_USB_DEVICE_LOCAL, 0xA5DCBF10, 0x6530, 0x11D2, 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED);
 DEFINE_GUID(GUID_DEVINTERFACE_KEYBOARD_LOCAL, 0x884B96C3, 0x56EF, 0x11D1, 0xBC, 0x8C, 0x00, 0xA0, 0xC9, 0x14, 0x05, 0xDD);
+DEFINE_GUID(GUID_DEVINTERFACE_USB_HUB_LOCAL, 0xF18A0E88, 0xC30C, 0x11D0, 0x88, 0x15, 0x00, 0xA0, 0xC9, 0x06, 0xBE, 0xD8);
 
 #ifndef DEVICE_NOTIFY_ALL_INTERFACE_CLASSES
 #define DEVICE_NOTIFY_ALL_INTERFACE_CLASSES 0x00000004
@@ -14,12 +17,13 @@ DEFINE_GUID(GUID_DEVINTERFACE_KEYBOARD_LOCAL, 0x884B96C3, 0x56EF, 0x11D1, 0xBC, 
 
 DeviceWatcher::DeviceWatcher()
     : m_hWnd(NULL)
-    , m_hDevNotify(NULL)
     , m_isTargetConnected(true)
     , m_autoDetect(true)
     , m_baselineCount(0)
     , m_baselineEstablished(false)
+    , m_hasLastProbe(false)
 {
+    memset(&m_lastProbe, 0, sizeof(m_lastProbe));
 }
 
 DeviceWatcher::~DeviceWatcher() {
@@ -29,32 +33,44 @@ DeviceWatcher::~DeviceWatcher() {
 bool DeviceWatcher::Initialize(HWND hWnd) {
     m_hWnd = hWnd;
 
-    DEV_BROADCAST_DEVICEINTERFACE_W filter = { 0 };
-    filter.dbcc_size = sizeof(filter);
-    filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
-    filter.dbcc_classguid = GUID_DEVINTERFACE_HID_LOCAL;
+    // 4대 주요 PnP 인터페이스 클래스 전체 등록
+    const GUID* guids[] = {
+        &GUID_DEVINTERFACE_HID_LOCAL,
+        &GUID_DEVINTERFACE_USB_DEVICE_LOCAL,
+        &GUID_DEVINTERFACE_KEYBOARD_LOCAL,
+        &GUID_DEVINTERFACE_USB_HUB_LOCAL
+    };
 
-    m_hDevNotify = RegisterDeviceNotificationW(
-        m_hWnd,
-        &filter,
-        DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES
-    );
+    for (const auto* guid : guids) {
+        DEV_BROADCAST_DEVICEINTERFACE_W filter = { 0 };
+        filter.dbcc_size = sizeof(filter);
+        filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+        filter.dbcc_classguid = *guid;
 
-    if (m_hDevNotify) {
-        Logger::Log(L"[Device] RegisterDeviceNotification succeeded (hDevNotify: %p)", m_hDevNotify);
-    } else {
-        Logger::Log(L"[Device] RegisterDeviceNotification failed! Error: %lu", GetLastError());
+        HDEVNOTIFY hNotify = RegisterDeviceNotificationW(
+            m_hWnd,
+            &filter,
+            DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES
+        );
+
+        if (hNotify) {
+            m_devNotifyHandles.push_back(hNotify);
+        }
     }
+
+    Logger::Log(L"[Device] Registered %zu Device Notification filter(s)", m_devNotifyHandles.size());
 
     ResetBaseline();
     return true;
 }
 
 void DeviceWatcher::Cleanup() {
-    if (m_hDevNotify) {
-        UnregisterDeviceNotification(m_hDevNotify);
-        m_hDevNotify = NULL;
+    for (HDEVNOTIFY h : m_devNotifyHandles) {
+        if (h) {
+            UnregisterDeviceNotification(h);
+        }
     }
+    m_devNotifyHandles.clear();
 }
 
 KeyboardDeviceInfo DeviceWatcher::ParseDevicePath(const std::wstring& path) {
@@ -88,55 +104,6 @@ KeyboardDeviceInfo DeviceWatcher::ParseDevicePath(const std::wstring& path) {
     }
 
     return info;
-}
-
-bool DeviceWatcher::IsDevicePhysicallyPresent(const std::wstring& vid, const std::wstring& pid) {
-    if (vid.empty() || pid.empty()) return false;
-
-    std::wstring uVid = vid;
-    std::wstring uPid = pid;
-    std::transform(uVid.begin(), uVid.end(), uVid.begin(), ::towupper);
-    std::transform(uPid.begin(), uPid.end(), uPid.begin(), ::towupper);
-
-    // SetupAPI DIGCF_PRESENT: Windows 하드웨어 관리자와 동일한 물리적 실재성 실시간 검사
-    HDEVINFO hDevInfo = SetupDiGetClassDevsW(
-        &GUID_DEVINTERFACE_HID_LOCAL,
-        NULL,
-        NULL,
-        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
-    );
-
-    if (hDevInfo == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    SP_DEVICE_INTERFACE_DATA ifData = { sizeof(SP_DEVICE_INTERFACE_DATA) };
-    bool found = false;
-
-    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &GUID_DEVINTERFACE_HID_LOCAL, i, &ifData); ++i) {
-        DWORD reqSize = 0;
-        SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifData, NULL, 0, &reqSize, NULL);
-        if (reqSize > 0) {
-            std::vector<BYTE> buf(reqSize);
-            PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)buf.data();
-            detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-
-            if (SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifData, detail, reqSize, NULL, NULL)) {
-                std::wstring path = detail->DevicePath;
-                std::wstring upper = path;
-                std::transform(upper.begin(), upper.end(), upper.begin(), ::towupper);
-
-                if (upper.find(L"VID_" + uVid) != std::wstring::npos &&
-                    upper.find(L"PID_" + uPid) != std::wstring::npos) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    SetupDiDestroyDeviceInfoList(hDevInfo);
-    return found;
 }
 
 std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
@@ -180,6 +147,135 @@ std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
     return list;
 }
 
+DeviceProbeResult DeviceWatcher::ProbeTargetDevice(bool logDetailed) {
+    DeviceProbeResult res = { 0 };
+    res.rawInputPresent = false;
+    res.setupApiPresent = false;
+    res.canOpenFile = false;
+    res.openFileError = 0;
+    res.devNodeFound = false;
+    res.devNodeStatus = 0;
+    res.devNodeProblem = 0;
+
+    std::wstring targetVid = GetTargetVid();
+    std::wstring targetPid = GetTargetPid();
+
+    if (targetVid.empty() || targetPid.empty()) {
+        if (logDetailed) {
+            Logger::Log(L"[Probe] Target VID/PID is empty. Cannot probe.");
+        }
+        return res;
+    }
+
+    std::wstring uTargetVid = targetVid;
+    std::wstring uTargetPid = targetPid;
+    std::transform(uTargetVid.begin(), uTargetVid.end(), uTargetVid.begin(), ::towupper);
+    std::transform(uTargetPid.begin(), uTargetPid.end(), uTargetPid.begin(), ::towupper);
+
+    // 1. Raw Input 센서 검사
+    std::vector<KeyboardDeviceInfo> rawKeyboards = GetConnectedKeyboards();
+    for (const auto& kb : rawKeyboards) {
+        if (kb.vid == uTargetVid && kb.pid == uTargetPid) {
+            res.rawInputPresent = true;
+            if (res.devicePath.empty()) res.devicePath = kb.devicePath;
+            break;
+        }
+    }
+
+    // 2. SetupAPI & CfgMgr 센서 검사
+    HDEVINFO hDevInfo = SetupDiGetClassDevsW(
+        &GUID_DEVINTERFACE_HID_LOCAL,
+        NULL,
+        NULL,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
+    );
+
+    if (hDevInfo != INVALID_HANDLE_VALUE) {
+        SP_DEVICE_INTERFACE_DATA ifData = { sizeof(SP_DEVICE_INTERFACE_DATA) };
+
+        for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &GUID_DEVINTERFACE_HID_LOCAL, i, &ifData); ++i) {
+            DWORD reqSize = 0;
+            SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifData, NULL, 0, &reqSize, NULL);
+            if (reqSize > 0) {
+                std::vector<BYTE> buf(reqSize);
+                PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)buf.data();
+                detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+
+                SP_DEVINFO_DATA devInfoData = { sizeof(SP_DEVINFO_DATA) };
+
+                if (SetupDiGetDeviceInterfaceDetailW(hDevInfo, &ifData, detail, reqSize, NULL, &devInfoData)) {
+                    std::wstring path = detail->DevicePath;
+                    std::wstring upper = path;
+                    std::transform(upper.begin(), upper.end(), upper.begin(), ::towupper);
+
+                    if (upper.find(L"VID_" + uTargetVid) != std::wstring::npos &&
+                        upper.find(L"PID_" + uTargetPid) != std::wstring::npos) {
+                        res.setupApiPresent = true;
+                        res.devicePath = path;
+
+                        // DevNode 하드웨어 상태 질의
+                        res.devNodeFound = true;
+                        ULONG status = 0, problem = 0;
+                        if (CM_Get_DevNode_Status(&status, &problem, devInfoData.DevInst, 0) == CR_SUCCESS) {
+                            res.devNodeStatus = status;
+                            res.devNodeProblem = problem;
+                        }
+
+                        // 디바이스 인스턴스 ID 질의
+                        wchar_t instId[MAX_DEVICE_ID_LEN] = { 0 };
+                        if (CM_Get_Device_IDW(devInfoData.DevInst, instId, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS) {
+                            res.devInstanceId = instId;
+                        }
+
+                        break; // 대상 장치 발견
+                    }
+                }
+            }
+        }
+        SetupDiDestroyDeviceInfoList(hDevInfo);
+    }
+
+    // 3. 파일 핸들 I/O 센서 검사 (DevicePath를 직접 열 수 있는지)
+    if (!res.devicePath.empty()) {
+        HANDLE hFile = CreateFileW(
+            res.devicePath.c_str(),
+            0, // 쿼리 전용 (관리자 권한 불필요)
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_EXISTING,
+            0,
+            NULL
+        );
+
+        if (hFile != INVALID_HANDLE_VALUE) {
+            res.canOpenFile = true;
+            res.openFileError = 0;
+            CloseHandle(hFile);
+        } else {
+            res.canOpenFile = false;
+            res.openFileError = GetLastError();
+        }
+    }
+
+    if (logDetailed) {
+        Logger::Log(L"============================================================");
+        Logger::Log(L"[Diagnostic Probe] Target: VID_%s PID_%s", uTargetVid.c_str(), uTargetPid.c_str());
+        Logger::Log(L"  - Sensor 1 (RawInput Present) : %s", res.rawInputPresent ? L"YES" : L"NO");
+        Logger::Log(L"  - Sensor 2 (SetupAPI Present) : %s", res.setupApiPresent ? L"YES" : L"NO");
+        Logger::Log(L"  - Sensor 3 (Device Node Found): %s (Status: 0x%08X, Problem: %lu)",
+            res.devNodeFound ? L"YES" : L"NO", res.devNodeStatus, res.devNodeProblem);
+        Logger::Log(L"  - Sensor 4 (Can Open Handle)  : %s (Error Code: %lu)",
+            res.canOpenFile ? L"YES" : L"NO", res.openFileError);
+        Logger::Log(L"  - Device Instance ID         : %s",
+            res.devInstanceId.empty() ? L"(None)" : res.devInstanceId.c_str());
+        Logger::Log(L"  - Active Device Path          : %s",
+            res.devicePath.empty() ? L"(None)" : res.devicePath.c_str());
+        Logger::Log(L"============================================================");
+    }
+
+    return res;
+}
+
 void DeviceWatcher::ResetBaseline() {
     std::vector<KeyboardDeviceInfo> keyboards = GetConnectedKeyboards();
     std::vector<KeyboardDeviceInfo> externalKbs;
@@ -200,7 +296,7 @@ void DeviceWatcher::ResetBaseline() {
     }
 
     Logger::Log(L"[Device] === Baseline Reset Established ===");
-    Logger::Log(L"[Device] Baseline external count: %zu (Auto-locked Target: VID_%s PID_%s)",
+    Logger::Log(L"[Device] Baseline external count: %zu (Target: VID_%s PID_%s)",
         m_baselineCount, m_autoLockedVid.c_str(), m_autoLockedPid.c_str());
 
     for (size_t i = 0; i < externalKbs.size(); ++i) {
@@ -208,6 +304,8 @@ void DeviceWatcher::ResetBaseline() {
             i, externalKbs[i].vid.c_str(), externalKbs[i].pid.c_str(), externalKbs[i].friendlyName.c_str());
     }
 
+    // 초기 상태 정밀 프로브 수행
+    ProbeTargetDevice(true);
     EvaluateState(L"Baseline Reset");
 }
 
@@ -234,41 +332,35 @@ void DeviceWatcher::OnDeviceChange(WPARAM wParam, LPARAM lParam) {
     else if (wParam == DBT_DEVICEREMOVECOMPLETE) evtName = L"DBT_DEVICEREMOVECOMPLETE";
     else if (wParam == DBT_DEVNODES_CHANGED) evtName = L"DBT_DEVNODES_CHANGED";
 
-    Logger::Log(L"[PnP] WM_DEVICECHANGE: %s (wParam: 0x%IX)", evtName, (UINT_PTR)wParam);
+    Logger::Log(L"[PnP Event] WM_DEVICECHANGE: %s (wParam: 0x%IX)", evtName, (UINT_PTR)wParam);
 
-    // [핵심] 권위적(Authoritative) PnP 이벤트 즉결 처리
     if (lParam) {
         DEV_BROADCAST_HDR* hdr = (DEV_BROADCAST_HDR*)lParam;
         if (hdr->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE) {
             DEV_BROADCAST_DEVICEINTERFACE_W* di = (DEV_BROADCAST_DEVICEINTERFACE_W*)lParam;
             KeyboardDeviceInfo evInfo = ParseDevicePath(di->dbcc_name);
 
-            Logger::Log(L"[PnP]   Target Path: %s (Parsed VID_%s PID_%s, External=%s)",
+            Logger::Log(L"[PnP Event]   Device: %s (VID_%s PID_%s, External=%s)",
                 di->dbcc_name, evInfo.vid.c_str(), evInfo.pid.c_str(), evInfo.isExternal ? L"YES" : L"NO");
 
-            std::wstring activeVid = (!m_targetVid.empty()) ? m_targetVid : m_autoLockedVid;
-            std::wstring activePid = (!m_targetPid.empty()) ? m_targetPid : m_autoLockedPid;
+            std::wstring targetVid = GetTargetVid();
+            std::wstring targetPid = GetTargetPid();
 
-            bool matchesTarget = (!activeVid.empty() && !activePid.empty() &&
-                                  evInfo.vid == activeVid && evInfo.pid == activePid);
+            bool matchesTarget = (!targetVid.empty() && !targetPid.empty() &&
+                                  evInfo.vid == targetVid && evInfo.pid == targetPid);
 
-            // 타겟 장치가 명시적으로 분리되었을 때 -> 0ms 즉시 DISCONNECTED!
             if (wParam == DBT_DEVICEREMOVECOMPLETE) {
                 if (matchesTarget || evInfo.isExternal) {
                     std::wstring desc = L"Keyboard Disconnected: [VID:" + evInfo.vid + L" PID:" + evInfo.pid + L"]";
                     UpdateStateInternal(false, L"Authoritative PnP Removed", desc);
+                    ProbeTargetDevice(true);
                     return;
                 }
-            }
-            // 타겟 장치가 명시적으로 다시 연결되었을 때 -> 0ms 즉시 CONNECTED!
-            else if (wParam == DBT_DEVICEARRIVAL) {
+            } else if (wParam == DBT_DEVICEARRIVAL) {
                 if (matchesTarget || evInfo.isExternal) {
-                    if (m_autoLockedVid.empty() && !evInfo.vid.empty()) {
-                        m_autoLockedVid = evInfo.vid;
-                        m_autoLockedPid = evInfo.pid;
-                    }
                     std::wstring desc = L"Keyboard Connected: [VID:" + evInfo.vid + L" PID:" + evInfo.pid + L"]";
                     UpdateStateInternal(true, L"Authoritative PnP Arrived", desc);
+                    ProbeTargetDevice(true);
                     return;
                 }
             }
@@ -279,34 +371,62 @@ void DeviceWatcher::OnDeviceChange(WPARAM wParam, LPARAM lParam) {
 }
 
 void DeviceWatcher::EvaluateState(const wchar_t* triggerReason) {
-    std::wstring activeVid = (!m_targetVid.empty()) ? m_targetVid : m_autoLockedVid;
-    std::wstring activePid = (!m_targetPid.empty()) ? m_targetPid : m_autoLockedPid;
+    std::wstring targetVid = GetTargetVid();
+    std::wstring targetPid = GetTargetPid();
 
-    // 타겟 VID/PID가 결정되어 있는 경우 -> SetupAPI 커널 물리 존재 여부 1:1 확인
-    if (!activeVid.empty() && !activePid.empty()) {
-        bool physicallyPresent = IsDevicePhysicallyPresent(activeVid, activePid);
-        std::wstring name = physicallyPresent
-            ? (L"Keyboard (VID:" + activeVid + L" PID:" + activePid + L")")
-            : (L"Target VID:" + activeVid + L" PID:" + activePid + L" [Disconnected]");
-
-        UpdateStateInternal(physicallyPresent, triggerReason, name);
-        return;
+    if (targetVid.empty() || targetPid.empty()) {
+        std::vector<KeyboardDeviceInfo> kbs = GetConnectedKeyboards();
+        if (!kbs.empty()) {
+            m_autoLockedVid = kbs[0].vid;
+            m_autoLockedPid = kbs[0].pid;
+            targetVid = m_autoLockedVid;
+            targetPid = m_autoLockedPid;
+        }
     }
 
-    // 타겟이 아직 없는 경우 -> RawInput 및 SetupAPI 폴백
-    std::vector<KeyboardDeviceInfo> keyboards = GetConnectedKeyboards();
-    std::vector<KeyboardDeviceInfo> externalKbs;
-    for (const auto& kb : keyboards) {
-        if (kb.isExternal) externalKbs.push_back(kb);
+    // 5대 센서 프로브 실행
+    DeviceProbeResult probe = ProbeTargetDevice(false);
+
+    // 센서 상태 변화 감지 로깅
+    if (!m_hasLastProbe ||
+        probe.rawInputPresent != m_lastProbe.rawInputPresent ||
+        probe.setupApiPresent != m_lastProbe.setupApiPresent ||
+        probe.canOpenFile != m_lastProbe.canOpenFile ||
+        probe.openFileError != m_lastProbe.openFileError ||
+        probe.devNodeProblem != m_lastProbe.devNodeProblem) {
+
+        Logger::Log(L"[Sensor Diff] Trigger: %s | RawInput: %d->%d | SetupAPI: %d->%d | CanOpen: %d->%d (Err: %lu->%lu) | Problem: %lu->%lu",
+            triggerReason,
+            m_lastProbe.rawInputPresent ? 1 : 0, probe.rawInputPresent ? 1 : 0,
+            m_lastProbe.setupApiPresent ? 1 : 0, probe.setupApiPresent ? 1 : 0,
+            m_lastProbe.canOpenFile ? 1 : 0, probe.canOpenFile ? 1 : 0,
+            m_lastProbe.openFileError, probe.openFileError,
+            m_lastProbe.devNodeProblem, probe.devNodeProblem);
+
+        m_lastProbe = probe;
+        m_hasLastProbe = true;
     }
 
-    if (!externalKbs.empty()) {
-        m_autoLockedVid = externalKbs[0].vid;
-        m_autoLockedPid = externalKbs[0].pid;
-        UpdateStateInternal(true, triggerReason, externalKbs[0].friendlyName);
+    // 다중 센서 종합 판별식:
+    // SetupAPI에 물리적으로 존재하고, 파일 핸들이 유효하거나 에러가 치명적이지 않은 경우 -> CONNECTED
+    bool isConnected = false;
+    if (probe.setupApiPresent && probe.devNodeProblem == 0) {
+        // 장치가 존재하고 하드웨어 오류가 없음
+        // 만약 파일 핸들 열기 실패 코드가 ERROR_DEVICE_NOT_CONNECTED(1167)라면 연결 끊김으로 처리
+        if (!probe.canOpenFile && probe.openFileError == ERROR_DEVICE_NOT_CONNECTED) {
+            isConnected = false;
+        } else {
+            isConnected = true;
+        }
     } else {
-        UpdateStateInternal(false, triggerReason, L"No External Keyboard Detected");
+        isConnected = false;
     }
+
+    std::wstring name = isConnected
+        ? (L"Keyboard (VID:" + targetVid + L" PID:" + targetPid + L")")
+        : (L"Target VID:" + targetVid + L" PID:" + targetPid + L" [Disconnected]");
+
+    UpdateStateInternal(isConnected, triggerReason, name);
 }
 
 bool DeviceWatcher::CheckConnectionState() {
@@ -323,6 +443,7 @@ void DeviceWatcher::SetTarget(const std::wstring& vid, const std::wstring& pid, 
     m_targetPid = pid;
     m_autoDetect = false;
     Logger::Log(L"[Device] SetTarget -> VID: %s, PID: %s (%s)", vid.c_str(), pid.c_str(), name.c_str());
+    ProbeTargetDevice(true);
     EvaluateState(L"Target Set");
 }
 

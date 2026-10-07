@@ -21,6 +21,7 @@ enum MenuIDs {
     IDM_SEPARATOR_1,
     IDM_TEST_OVERLAY,
     IDM_OPEN_LOG,
+    IDM_PROBE_DIAGNOSTIC,
     IDM_RESET_BASELINE,
     IDM_SEPARATOR_2,
     IDM_AUTO_DETECT_KB,
@@ -229,6 +230,7 @@ void Application::ShowContextMenu() {
     // 2. 진단 및 테스트 기능 (핵심!)
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_PROBE_DIAGNOSTIC, L"🔬 5대 센서 하드웨어 정밀 진단 실행");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_RESET_BASELINE, L"🔄 현재 연결 상태를 기준(Baseline)으로 재설정");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
@@ -312,6 +314,11 @@ void Application::ShowContextMenu() {
 
     case IDM_OPEN_LOG:
         Logger::OpenLogFile();
+        break;
+
+    case IDM_PROBE_DIAGNOSTIC:
+        m_deviceWatcher.ProbeTargetDevice(true);
+        MessageBoxW(m_hWnd, L"5대 센서 하드웨어 정밀 진단이 완료되어 debug.log에 기록되었습니다.\n'실시간 진단 로그 열기'를 눌러 센서별 결과를 확인하세요.", L"정밀 진단 완료", MB_OK | MB_ICONINFORMATION);
         break;
 
     case IDM_RESET_BASELINE:
