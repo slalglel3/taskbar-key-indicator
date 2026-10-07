@@ -21,6 +21,9 @@ enum MenuIDs {
     IDM_TEST_OVERLAY,
     IDM_OPEN_LOG,
     IDM_SEPARATOR_2,
+    IDM_STYLE_TINT,
+    IDM_STYLE_BAR,
+    IDM_SEPARATOR_STYLE,
     IDM_COLOR_RED,
     IDM_COLOR_ORANGE,
     IDM_COLOR_AMBER,
@@ -135,13 +138,13 @@ HICON Application::CreateLedIcon(COLORREF color) {
     Ellipse(hdcMem, 2, 2, 14, 14);
     Ellipse(hdcMask, 2, 2, 14, 14);
 
-    // 하이라이트 코어 (드로잉 전후 엄격한 브러시 스택 복원)
+    // 하이라이트 코어 (엄격한 대칭 복원)
     HBRUSH hBrWhite = CreateSolidBrush(RGB(255, 255, 255));
     HBRUSH hPrevBr = (HBRUSH)SelectObject(hdcMem, hBrWhite);
     Ellipse(hdcMem, 4, 4, 8, 8);
-    SelectObject(hdcMem, hPrevBr); // 원래 색상 브러시로 즉각 복원
+    SelectObject(hdcMem, hPrevBr);
 
-    // 원래 기본 브러시 및 비트맵으로 완벽 복원 후 DC 삭제 (GDI 누수 원천 차단)
+    // 원래 기본 브러시 및 비트맵으로 완벽 복원 후 DC 삭제
     SelectObject(hdcMem, hOldBrMem);
     SelectObject(hdcMask, hOldBrMask);
     SelectObject(hdcMem, hOldBmp);
@@ -204,15 +207,17 @@ void Application::UpdateTrayIcon(bool isConnected) {
 }
 
 void Application::UpdateState(bool isConnected, const std::wstring& title) {
-    Logger::Log(L"[App] UpdateState -> Connected: %s, Title: %s",
-        isConnected ? L"YES" : L"NO", title.c_str());
+    Logger::Log(L"[App] UpdateState -> Connected: %s, Title: %s, Style: %s",
+        isConnected ? L"YES" : L"NO", title.c_str(),
+        m_config.disconnectedStyle == 1 ? L"Full Tint" : L"LED Bar");
 
     m_overlayMgr.SetState(
         isConnected,
         m_config.disconnectedColor,
         m_config.connectedColor,
         m_config.showWhenConnected,
-        m_config.barThickness
+        m_config.barThickness,
+        m_config.disconnectedStyle
     );
 
     UpdateTrayIcon(isConnected);
@@ -228,7 +233,7 @@ void Application::ShowContextMenu() {
     std::wstring matchedTitle = m_browserWatcher.GetMatchedTitle();
 
     // 1. 상태 헤더
-    std::wstring statusStr = isConnected ? L"● 상태: PC 연결됨 (초록 LED)" : L"○ 상태: 모바일 전환됨 (적색 LED)";
+    std::wstring statusStr = isConnected ? L"● 상태: PC 연결됨 (초록 LED)" : L"○ 상태: 모바일 전환됨 (적색 틴트/LED)";
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_STATUS_HEADER, statusStr.c_str());
 
     std::wstring syncDesc = matchedTitle.empty() ? L"  동기화: [대기 중]" : (L"  동기화: " + matchedTitle);
@@ -237,21 +242,29 @@ void Application::ShowContextMenu() {
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_1, NULL);
 
     // 2. 테스트 및 로그
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ 모바일 전환 효과 강제 테스트 (5초간 표시)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 로그 열기 (debug.log)");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
 
-    // 3. LED 색상 서브메뉴
+    // 3. 모바일 전환 시 표시 스타일 서브메뉴 (핵심 개선 기능!)
+    HMENU hStyleMenu = CreatePopupMenu();
+    InsertMenuW(hStyleMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedStyle == 1 ? MF_CHECKED : 0),
+        IDM_STYLE_TINT, L"작업표시줄 전체 틴트 덮기 (시인성 극대화) [추천]");
+    InsertMenuW(hStyleMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedStyle == 0 ? MF_CHECKED : 0),
+        IDM_STYLE_BAR, L"상단 네온 LED 바만 표시 (심플)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hStyleMenu, L"🎨 모바일 전환 시 표시 스타일");
+
+    // 4. LED 바/틴트 색상 서브메뉴
     HMENU hColorMenu = CreatePopupMenu();
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 45, 85) ? MF_CHECKED : 0), IDM_COLOR_RED, L"네온 레드 (#FF2D55) [기본]");
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 149, 0) ? MF_CHECKED : 0), IDM_COLOR_ORANGE, L"네온 오렌지 (#FF9500)");
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 204, 0) ? MF_CHECKED : 0), IDM_COLOR_AMBER, L"네온 앰버 (#FFCC00)");
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 55, 95) ? MF_CHECKED : 0), IDM_COLOR_PINK, L"네온 핑크 (#FF375F)");
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(0, 122, 255) ? MF_CHECKED : 0), IDM_COLOR_BLUE, L"네온 블루 (#007AFF)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hColorMenu, L"LED 바 색상 설정");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hColorMenu, L"모바일 전환 색상 설정");
 
-    // 4. LED 바 두께 서브메뉴
+    // 5. LED 바 두께 서브메뉴 (LED 바 모드 및 상단 하이라이트 두께)
     HMENU hThickMenu = CreatePopupMenu();
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 2 ? MF_CHECKED : 0), IDM_THICKNESS_2, L"2 픽셀");
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 3 ? MF_CHECKED : 0), IDM_THICKNESS_3, L"3 픽셀 [권장]");
@@ -261,13 +274,13 @@ void Application::ShowContextMenu() {
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_3, NULL);
 
-    // 5. 옵션
+    // 6. 옵션
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.showWhenConnected ? MF_CHECKED : 0), IDM_SHOW_WHEN_CONNECTED, L"유선 연결 시에도 초록 LED 표시");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.autoStart ? MF_CHECKED : 0), IDM_AUTO_START, L"윈도우 시작 시 자동 실행");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_4, NULL);
 
-    // 6. 설정 파일 열기 & 종료
+    // 7. 설정 파일 열기 & 종료
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_CONFIG, L"설정 파일 열기 (config.ini)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_EXIT, L"종료 (Exit)");
 
@@ -285,6 +298,20 @@ void Application::ShowContextMenu() {
 
     case IDM_OPEN_LOG:
         Logger::OpenLogFile();
+        break;
+
+    case IDM_STYLE_TINT:
+        m_config.disconnectedStyle = 1;
+        ConfigManager::SaveConfig(m_config);
+        m_overlayMgr.SetDisconnectedStyle(1);
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
+        break;
+
+    case IDM_STYLE_BAR:
+        m_config.disconnectedStyle = 0;
+        ConfigManager::SaveConfig(m_config);
+        m_overlayMgr.SetDisconnectedStyle(0);
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
 
     case IDM_COLOR_RED:
@@ -404,7 +431,7 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 1. 로거 초기화 (가장 먼저 실행)
     Logger::Init();
-    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.2.1 (Zero-Defect Clean Edition)...");
+    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.3.0 (Taskbar Tint & LED Bar Dual Mode)...");
 
     // 2. 단일 인스턴스 중복 실행 방지
     m_hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
@@ -416,8 +443,8 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 3. 설정 로드
     m_config = ConfigManager::LoadConfig();
-    Logger::Log(L"[App] Config loaded: BarThickness=%d, ShowWhenConnected=%d",
-        m_config.barThickness, m_config.showWhenConnected ? 1 : 0);
+    Logger::Log(L"[App] Config loaded: BarThickness=%d, ShowWhenConnected=%d, DisconnectedStyle=%d",
+        m_config.barThickness, m_config.showWhenConnected ? 1 : 0, m_config.disconnectedStyle);
 
     // 4. 최상위 숨김 메시지 윈도우 생성 (WS_POPUP, 0,0,0,0)
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };

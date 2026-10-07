@@ -50,6 +50,7 @@ AppConfig ConfigManager::LoadConfig() {
     cfg.connectedColor = RGB(50, 215, 75);     // 네온 그린 (#32D74B)
     cfg.showWhenConnected = false;             // 유선 연결 시에는 평상시 작업표시줄 유지 (숨김)
     cfg.barThickness = 3;                      // 3px
+    cfg.disconnectedStyle = 1;                 // 1: 작업표시줄 전체 틴트 덮기 (시인성 극대화 기본 권장)
     cfg.autoStart = IsAutoStartEnabled();
 
     std::wstring iniPath = GetConfigPath();
@@ -78,6 +79,12 @@ AppConfig ConfigManager::LoadConfig() {
     if (th > 10) th = 10;
     cfg.barThickness = th;
 
+    // DisconnectedStyle (0: 상단 LED 바, 1: 작업표시줄 전체 틴트)
+    cfg.disconnectedStyle = GetPrivateProfileIntW(SECTION_GENERAL, L"DisconnectedStyle", 1, iniPath.c_str());
+    if (cfg.disconnectedStyle != 0 && cfg.disconnectedStyle != 1) {
+        cfg.disconnectedStyle = 1;
+    }
+
     return cfg;
 }
 
@@ -88,6 +95,7 @@ void ConfigManager::SaveConfig(const AppConfig& cfg) {
     WritePrivateProfileStringW(SECTION_GENERAL, L"ConnectedColor", ColorToHex(cfg.connectedColor).c_str(), iniPath.c_str());
     WritePrivateProfileStringW(SECTION_GENERAL, L"ShowWhenConnected", cfg.showWhenConnected ? L"1" : L"0", iniPath.c_str());
     WritePrivateProfileStringW(SECTION_GENERAL, L"BarThickness", std::to_wstring(cfg.barThickness).c_str(), iniPath.c_str());
+    WritePrivateProfileStringW(SECTION_GENERAL, L"DisconnectedStyle", std::to_wstring(cfg.disconnectedStyle).c_str(), iniPath.c_str());
 }
 
 bool ConfigManager::IsAutoStartEnabled() {

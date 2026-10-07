@@ -4,10 +4,11 @@
 #include <string>
 
 struct AppConfig {
-    COLORREF disconnectedColor; // 키보드 모바일 전환 시 LED 색상 (기본: 네온 레드)
+    COLORREF disconnectedColor; // 키보드 모바일 전환 시 LED/틴트 색상 (기본: 네온 레드)
     COLORREF connectedColor;    // 키보드 PC 연결 시 LED 색상 (기본: 네온 그린)
     bool showWhenConnected;     // PC 연결 시에도 LED 표시할지 여부 (기본: false - 평상시 숨김)
     int barThickness;           // LED 바 두께 (픽셀, 기본: 3)
+    int disconnectedStyle;      // 모바일 전환 시 표시 스타일 (0: 상단 LED 바, 1: 작업표시줄 전체 틴트 [기본: 1])
     bool autoStart;             // 윈도우 시작 시 자동 실행 여부
 };
 

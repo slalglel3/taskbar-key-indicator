@@ -3,30 +3,28 @@
 #include <algorithm>
 #include <cstdint>
 
-static const wchar_t* OVERLAY_CLASS_NAME = L"TaskbarLedOverlayClass";
-static const UINT_PTR TIMER_TEST_RESTORE = 2001;
+static const wchar_t* OVERLAY_CLASS_NAME = L"TaskbarKeyIndicator_NeonOverlay";
+static const UINT_PTR TIMER_TEST_RESTORE = 9001;
 
-static COLORREF BlendColor(COLORREF c1, COLORREF c2, float t) {
-    BYTE r = (BYTE)(GetRValue(c1) * (1.0f - t) + GetRValue(c2) * t);
-    BYTE g = (BYTE)(GetGValue(c1) * (1.0f - t) + GetGValue(c2) * t);
-    BYTE b = (BYTE)(GetBValue(c1) * (1.0f - t) + GetBValue(c2) * t);
+// 색상 계산 유틸리티
+static inline COLORREF Lighten(COLORREF c, float factor) {
+    BYTE r = (BYTE)std::min(255.0f, GetRValue(c) + (255 - GetRValue(c)) * factor);
+    BYTE g = (BYTE)std::min(255.0f, GetGValue(c) + (255 - GetGValue(c)) * factor);
+    BYTE b = (BYTE)std::min(255.0f, GetBValue(c) + (255 - GetBValue(c)) * factor);
     return RGB(r, g, b);
 }
 
-static COLORREF Lighten(COLORREF c, float amount) {
-    return BlendColor(c, RGB(255, 255, 255), amount);
+static inline COLORREF Darken(COLORREF c, float factor) {
+    BYTE r = (BYTE)(GetRValue(c) * (1.0f - factor));
+    BYTE g = (BYTE)(GetGValue(c) * (1.0f - factor));
+    BYTE b = (BYTE)(GetBValue(c) * (1.0f - factor));
+    return RGB(r, g, b);
 }
 
-static COLORREF Darken(COLORREF c, float amount) {
-    return BlendColor(c, RGB(0, 0, 0), amount);
-}
-
-// 32비트 ARGB 프리멀티플라이드 픽셀 생성
 static inline uint32_t MakePremultipliedArgb(BYTE r, BYTE g, BYTE b, BYTE a) {
-    float f = a / 255.0f;
-    BYTE pr = (BYTE)(r * f);
-    BYTE pg = (BYTE)(g * f);
-    BYTE pb = (BYTE)(b * f);
+    BYTE pr = (BYTE)((r * a + 127) / 255);
+    BYTE pg = (BYTE)((g * a + 127) / 255);
+    BYTE pb = (BYTE)((b * a + 127) / 255);
     return ((uint32_t)a << 24) | ((uint32_t)pr << 16) | ((uint32_t)pg << 8) | (uint32_t)pb;
 }
 
@@ -37,6 +35,7 @@ TaskbarOverlayManager::TaskbarOverlayManager()
     , m_shouldShow(false)
     , m_isTesting(false)
     , m_thickness(3)
+    , m_disconnectedStyle(1) // 기본값 1: 작업표시줄 전체 틴트 (시인성 극대화)
 {
 }
 
@@ -98,20 +97,17 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
     if (hPrimaryTray) {
         allTrays.push_back(hPrimaryTray);
     } else {
-        Logger::Log(L"[Overlay] Shell_TrayWnd not found! Taskbar handle is NULL.");
+        Logger::Log(L"[Overlay] Shell_TrayWnd not found!");
     }
 
-    // 보조 모니터 작업표시줄들
+    // 보조 모니터 작업표시줄 열거
     EnumTrayData data;
     EnumWindows(EnumWindowsProc, (LPARAM)&data);
     for (HWND hSec : data.trayHwnds) {
         allTrays.push_back(hSec);
     }
 
-    Logger::Log(L"[Overlay] Found %zu taskbar window(s) (Primary: %s, Secondaries: %zu)",
-        allTrays.size(), hPrimaryTray ? L"Yes" : L"No", data.trayHwnds.size());
-
-    // 불필요한 기존 오버레이 정리
+    // 기존 오버레이 중 유효하지 않은 것 정리
     std::vector<OverlayWindowInfo> validOverlays;
     for (auto& info : m_overlays) {
         bool found = false;
@@ -142,7 +138,7 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
         }
         if (!exists) {
             // [핵심] WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST
-            // DWM 독립 컴포지션 서피스를 사용하여 작업표시줄 클릭 시에도 0.0001초도 지워지지 않음!
+            // DWM 독립 컴포지션 서피스를 사용하여 작업표시줄 클릭 시에도 100% 완전 투과
             DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED;
             DWORD style = WS_POPUP;
 
@@ -152,12 +148,11 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
                 L"",
                 style,
                 0, 0, 0, 0,
-                hTray, // [핵심] 작업표시줄을 소유자(Owner)로 지정 -> 작업표시줄 클릭 시에도 무조건 위에 표시!
+                hTray, // 작업표시줄을 소유자(Owner)로 지정
                 NULL, m_hInstance, this
             );
 
             if (hOverlay) {
-                SetWindowLongPtrW(hOverlay, GWLP_USERDATA, (LONG_PTR)this);
                 OverlayWindowInfo info;
                 info.hOverlay = hOverlay;
                 info.hTargetTray = hTray;
@@ -173,7 +168,7 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
     UpdatePositions();
 }
 
-void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, int w, int h, COLORREF color, bool isHorizontal) {
+void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, int w, int h, COLORREF color, bool isHorizontal, bool isFullTint) {
     if (w <= 0 || h <= 0) return;
 
     BITMAPINFO bi = { 0 };
@@ -193,63 +188,109 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
     if (pBits) {
         uint32_t* pixels = (uint32_t*)pBits;
 
-        if (isHorizontal) {
-            for (int row = 0; row < h; ++row) {
-                COLORREF lineCol;
-                BYTE alpha = 255;
-                if (row == 0) {
-                    lineCol = Lighten(color, 0.50f); // 코어 하이라이트
-                    alpha = 255;
-                } else if (row == 1) {
-                    lineCol = Lighten(color, 0.15f); // 메인 네온 바
-                    alpha = 255;
-                } else if (row == h - 1) {
-                    lineCol = Darken(color, 0.20f);  // 소프트 글로우
-                    alpha = 220;
-                } else {
-                    lineCol = color;
-                    alpha = 240;
+        if (isFullTint) {
+            // [옵션 1: 작업표시줄 전체 틴트 덮기 모드]
+            // 상단 3px는 강렬한 네온 LED 라인으로 하이라이트하고,
+            // 작업표시줄 본체 전체는 은은한 반투명 틴트(약 21% 불투명도, 알파 55)로 물들여 시인성 극대화!
+            BYTE tintAlpha = 55;
+            uint32_t tintPixel = MakePremultipliedArgb(GetRValue(color), GetGValue(color), GetBValue(color), tintAlpha);
+
+            if (isHorizontal) {
+                for (int row = 0; row < h; ++row) {
+                    uint32_t rowPixel;
+                    if (row == 0) {
+                        rowPixel = MakePremultipliedArgb(GetRValue(Lighten(color, 0.50f)), GetGValue(Lighten(color, 0.50f)), GetBValue(Lighten(color, 0.50f)), 255);
+                    } else if (row == 1) {
+                        rowPixel = MakePremultipliedArgb(GetRValue(Lighten(color, 0.20f)), GetGValue(Lighten(color, 0.20f)), GetBValue(Lighten(color, 0.20f)), 255);
+                    } else if (row == 2) {
+                        rowPixel = MakePremultipliedArgb(GetRValue(color), GetGValue(color), GetBValue(color), 220);
+                    } else {
+                        rowPixel = tintPixel;
+                    }
+
+                    int rowStart = row * w;
+                    for (int col = 0; col < w; ++col) {
+                        pixels[rowStart + col] = rowPixel;
+                    }
                 }
-
-                uint32_t pixelValue = MakePremultipliedArgb(
-                    GetRValue(lineCol),
-                    GetGValue(lineCol),
-                    GetBValue(lineCol),
-                    alpha
-                );
-
-                int rowStart = row * w;
+            } else {
                 for (int col = 0; col < w; ++col) {
-                    pixels[rowStart + col] = pixelValue;
+                    uint32_t colPixel;
+                    if (col == 0) {
+                        colPixel = MakePremultipliedArgb(GetRValue(Lighten(color, 0.50f)), GetGValue(Lighten(color, 0.50f)), GetBValue(Lighten(color, 0.50f)), 255);
+                    } else if (col == 1) {
+                        colPixel = MakePremultipliedArgb(GetRValue(Lighten(color, 0.20f)), GetGValue(Lighten(color, 0.20f)), GetBValue(Lighten(color, 0.20f)), 255);
+                    } else if (col == 2) {
+                        colPixel = MakePremultipliedArgb(GetRValue(color), GetGValue(color), GetBValue(color), 220);
+                    } else {
+                        colPixel = tintPixel;
+                    }
+
+                    for (int row = 0; row < h; ++row) {
+                        pixels[row * w + col] = colPixel;
+                    }
                 }
             }
         } else {
-            for (int col = 0; col < w; ++col) {
-                COLORREF lineCol;
-                BYTE alpha = 255;
-                if (col == 0) {
-                    lineCol = Lighten(color, 0.50f);
-                    alpha = 255;
-                } else if (col == 1) {
-                    lineCol = Lighten(color, 0.15f);
-                    alpha = 255;
-                } else if (col == w - 1) {
-                    lineCol = Darken(color, 0.20f);
-                    alpha = 220;
-                } else {
-                    lineCol = color;
-                    alpha = 240;
-                }
-
-                uint32_t pixelValue = MakePremultipliedArgb(
-                    GetRValue(lineCol),
-                    GetGValue(lineCol),
-                    GetBValue(lineCol),
-                    alpha
-                );
-
+            // [옵션 2: 상단 네온 LED 바 전용 모드]
+            if (isHorizontal) {
                 for (int row = 0; row < h; ++row) {
-                    pixels[row * w + col] = pixelValue;
+                    COLORREF lineCol;
+                    BYTE alpha = 255;
+                    if (row == 0) {
+                        lineCol = Lighten(color, 0.50f);
+                        alpha = 255;
+                    } else if (row == 1) {
+                        lineCol = Lighten(color, 0.15f);
+                        alpha = 255;
+                    } else if (row == h - 1) {
+                        lineCol = Darken(color, 0.20f);
+                        alpha = 220;
+                    } else {
+                        lineCol = color;
+                        alpha = 240;
+                    }
+
+                    uint32_t pixelValue = MakePremultipliedArgb(
+                        GetRValue(lineCol),
+                        GetGValue(lineCol),
+                        GetBValue(lineCol),
+                        alpha
+                    );
+
+                    int rowStart = row * w;
+                    for (int col = 0; col < w; ++col) {
+                        pixels[rowStart + col] = pixelValue;
+                    }
+                }
+            } else {
+                for (int col = 0; col < w; ++col) {
+                    COLORREF lineCol;
+                    BYTE alpha = 255;
+                    if (col == 0) {
+                        lineCol = Lighten(color, 0.50f);
+                        alpha = 255;
+                    } else if (col == 1) {
+                        lineCol = Lighten(color, 0.15f);
+                        alpha = 255;
+                    } else if (col == w - 1) {
+                        lineCol = Darken(color, 0.20f);
+                        alpha = 220;
+                    } else {
+                        lineCol = color;
+                        alpha = 240;
+                    }
+
+                    uint32_t pixelValue = MakePremultipliedArgb(
+                        GetRValue(lineCol),
+                        GetGValue(lineCol),
+                        GetBValue(lineCol),
+                        alpha
+                    );
+
+                    for (int row = 0; row < h; ++row) {
+                        pixels[row * w + col] = pixelValue;
+                    }
                 }
             }
         }
@@ -259,7 +300,7 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
         SIZE sizeWnd = { w, h };
         BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 
-        // [핵심] UpdateLayeredWindow 호출로 DWM 하드웨어 서피스에 비트맵 직접 전송
+        // UpdateLayeredWindow 호출로 DWM 하드웨어 서피스에 비트맵 직접 전송
         UpdateLayeredWindow(hOverlay, hdcScreen, &ptDst, &sizeWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
     }
 
@@ -271,6 +312,10 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
 
 void TaskbarOverlayManager::UpdatePositions() {
     bool visible = m_shouldShow || m_isTesting;
+
+    // 녹색(PC 유선)일 때는 항상 상단 LED 바 모드,
+    // 붉은색(모바일 전환 또는 테스트)일 때만 사용자가 선택한 스타일(틴트 vs LED 바) 적용
+    bool isFullTint = (!m_keyboardConnected || m_isTesting) && (m_disconnectedStyle == 1);
 
     for (auto& info : m_overlays) {
         if (!info.hTargetTray || !IsWindow(info.hTargetTray)) continue;
@@ -287,44 +332,46 @@ void TaskbarOverlayManager::UpdatePositions() {
         int x = rcTray.left;
         int y = rcTray.top;
         int w = trayWidth;
-        int h = m_thickness;
-        bool isHorizontal = true;
+        int h = trayHeight;
+        bool isHorizontal = (trayWidth >= trayHeight);
 
-        if (trayWidth >= trayHeight) {
-            // 가로형 작업표시줄
-            HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi = { sizeof(MONITORINFO) };
-            GetMonitorInfoW(hMon, &mi);
-
-            if (rcTray.top <= mi.rcMonitor.top + 10) {
-                // 상단 작업표시줄
-                y = rcTray.bottom - m_thickness;
-            } else {
-                // 하단 작업표시줄 (기본): 작업표시줄 상단 테두리에 완벽 밀착
-                y = rcTray.top;
-            }
+        if (isFullTint) {
+            // [전체 틴트 모드]: 작업표시줄 전체 사각형 덮기
+            x = rcTray.left;
+            y = rcTray.top;
             w = trayWidth;
-            h = m_thickness;
-            isHorizontal = true;
-        } else {
-            // 세로형 작업표시줄
-            HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi = { sizeof(MONITORINFO) };
-            GetMonitorInfoW(hMon, &mi);
-
-            if (rcTray.left <= mi.rcMonitor.left + 10) {
-                x = rcTray.right - m_thickness;
-            } else {
-                x = rcTray.left;
-            }
-            w = m_thickness;
             h = trayHeight;
-            isHorizontal = false;
+        } else {
+            // [LED 바 모드]: m_thickness 픽셀 두께의 테두리 바
+            if (isHorizontal) {
+                HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi = { sizeof(MONITORINFO) };
+                GetMonitorInfoW(hMon, &mi);
+
+                if (rcTray.top <= mi.rcMonitor.top + 10) {
+                    y = rcTray.bottom - m_thickness;
+                } else {
+                    y = rcTray.top;
+                }
+                w = trayWidth;
+                h = m_thickness;
+            } else {
+                HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi = { sizeof(MONITORINFO) };
+                GetMonitorInfoW(hMon, &mi);
+
+                if (rcTray.left <= mi.rcMonitor.left + 10) {
+                    x = rcTray.right - m_thickness;
+                } else {
+                    x = rcTray.left;
+                }
+                w = m_thickness;
+                h = trayHeight;
+            }
         }
 
         if (visible) {
-            // DWM 레이어드 윈도우 비트맵 전송 및 위치 갱신
-            RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal);
+            RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal, isFullTint);
             SetWindowPos(
                 info.hOverlay,
                 HWND_TOPMOST,
@@ -337,9 +384,10 @@ void TaskbarOverlayManager::UpdatePositions() {
     }
 }
 
-void TaskbarOverlayManager::SetState(bool keyboardConnected, COLORREF disconnectedColor, COLORREF connectedColor, bool showWhenConnected, int thickness) {
+void TaskbarOverlayManager::SetState(bool keyboardConnected, COLORREF disconnectedColor, COLORREF connectedColor, bool showWhenConnected, int thickness, int disconnectedStyle) {
     m_keyboardConnected = keyboardConnected;
     m_thickness = thickness;
+    m_disconnectedStyle = disconnectedStyle;
 
     if (m_keyboardConnected) {
         m_currentColor = connectedColor;
@@ -349,11 +397,12 @@ void TaskbarOverlayManager::SetState(bool keyboardConnected, COLORREF disconnect
         m_shouldShow = true;
     }
 
-    Logger::Log(L"[Overlay] SetState -> Connected: %s, Color: #%02X%02X%02X, Show: %s, Thick: %dpx",
+    Logger::Log(L"[Overlay] SetState -> Connected: %s, Color: #%02X%02X%02X, Show: %s, Thick: %dpx, Style: %s",
         m_keyboardConnected ? L"YES" : L"NO",
         GetRValue(m_currentColor), GetGValue(m_currentColor), GetBValue(m_currentColor),
         m_shouldShow ? L"YES" : L"NO",
-        m_thickness);
+        m_thickness,
+        m_disconnectedStyle == 1 ? L"Full Tint" : L"LED Bar");
 
     CreateOrUpdateOverlays();
 }
@@ -368,8 +417,14 @@ void TaskbarOverlayManager::SetColor(COLORREF color) {
     UpdatePositions();
 }
 
+void TaskbarOverlayManager::SetDisconnectedStyle(int style) {
+    m_disconnectedStyle = style;
+    UpdatePositions();
+}
+
 void TaskbarOverlayManager::ForceShowTest(int durationMs) {
-    Logger::Log(L"[Overlay] ForceShowTest initiated for %d ms", durationMs);
+    Logger::Log(L"[Overlay] ForceShowTest initiated for %d ms (Style: %s)",
+        durationMs, m_disconnectedStyle == 1 ? L"Full Tint" : L"LED Bar");
     m_isTesting = true;
     UpdatePositions();
 
