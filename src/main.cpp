@@ -23,6 +23,8 @@ enum MenuIDs {
     IDM_OPEN_LOG,
     IDM_SCAN_ALL_DEVICES,
     IDM_PROBE_DIAGNOSTIC,
+    IDM_SNAPSHOT_SAVE_A,
+    IDM_SNAPSHOT_COMPARE_B,
     IDM_RESET_BASELINE,
     IDM_SEPARATOR_2,
     IDM_AUTO_DETECT_KB,
@@ -233,6 +235,10 @@ void Application::ShowContextMenu() {
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SCAN_ALL_DEVICES, L"🔍 모든 입력 장치 & ForceLink 전수 스캔 (로그 즉시 열기)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_PROBE_DIAGNOSTIC, L"🔬 5대 센서 & HID 패킷 심층 진단 실행");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SNAPSHOT_SAVE_A, L"📸 [1단계] 전체 8개 장치 스냅샷 저장 (PC 연결 상태)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SNAPSHOT_COMPARE_B, L"🔍 [2단계] 전체 장치 Diff 대조 분석 (전환 후 클릭)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_RESET_BASELINE, L"🔄 현재 연결 상태를 기준(Baseline)으로 재설정");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
@@ -326,6 +332,16 @@ void Application::ShowContextMenu() {
     case IDM_PROBE_DIAGNOSTIC:
         m_deviceWatcher.ProbeTargetDevice(true);
         MessageBoxW(m_hWnd, L"5대 센서 하드웨어 정밀 진단이 완료되어 debug.log에 기록되었습니다.\n'실시간 진단 로그 열기'를 눌러 센서별 결과를 확인하세요.", L"정밀 진단 완료", MB_OK | MB_ICONINFORMATION);
+        break;
+
+    case IDM_SNAPSHOT_SAVE_A:
+        m_deviceWatcher.SaveSnapshotA();
+        MessageBoxW(m_hWnd, L"[1단계 완료]\n현재 PC 연결 상태에서 전체 8개 장치의 모든 하드웨어 상태 스냅샷이 저장되었습니다.\n\n이제 키보드를 모바일(BT)로 전환하신 후,\n'[2단계] 전체 장치 Diff 대조 분석'을 클릭하세요.", L"1단계 스냅샷 저장 완료", MB_OK | MB_ICONINFORMATION);
+        break;
+
+    case IDM_SNAPSHOT_COMPARE_B:
+        m_deviceWatcher.CompareSnapshotB();
+        Logger::OpenLogFile();
         break;
 
     case IDM_RESET_BASELINE:

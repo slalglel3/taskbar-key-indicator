@@ -70,6 +70,27 @@ struct DetailedDeviceInfo {
     bool isForceLinkCandidate = false;
 };
 
+struct SingleDeviceSnapshot {
+    std::wstring instanceId;
+    std::wstring friendlyName;
+    std::wstring description;
+    ULONG status = 0;
+    ULONG problem = 0;
+    bool canOpen = false;
+    DWORD openError = 0;
+    bool isHid = false;
+    bool getFeatureSuccess = false;
+    DWORD getFeatureError = 0;
+    bool getInputReportSuccess = false;
+    DWORD getInputReportError = 0;
+    bool setOutputReportSuccess = false;
+    DWORD setOutputReportError = 0;
+};
+
+struct SystemFullSnapshot {
+    std::vector<SingleDeviceSnapshot> devices;
+};
+
 class DeviceWatcher {
 public:
     DeviceWatcher();
@@ -89,6 +110,11 @@ public:
 
     // 시스템의 모든 입력 장치 및 ForceLink 동글 전수 상세 검색 및 인벤토리 덤프
     std::vector<DetailedDeviceInfo> ScanAllInputDevices(bool logDetailed = true);
+
+    // [전수 진단] 모든 입출력 장치 종합 스냅샷 촬영 및 A/B 1:1 정밀 Diff 대조
+    SystemFullSnapshot TakeSystemFullSnapshot();
+    void SaveSnapshotA();
+    void CompareSnapshotB();
 
     // 감지된 외장 키보드 목록 반환
     std::vector<KeyboardDeviceInfo> GetConnectedKeyboards();
@@ -129,6 +155,10 @@ private:
     // 직전 프로브 결과 캐시 (변화 감지용)
     DeviceProbeResult m_lastProbe;
     bool m_hasLastProbe;
+
+    // 시스템 전체 장치 A/B 비교용 스냅샷 캐시
+    SystemFullSnapshot m_savedSnapshot;
+    bool m_hasSavedSnapshot;
 
     static KeyboardDeviceInfo ParseDevicePath(const std::wstring& path);
     void EvaluateState(const wchar_t* triggerReason);
