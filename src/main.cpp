@@ -8,6 +8,7 @@
 #include "config.h"
 #include "taskbar_overlay.h"
 #include "device_watcher.h"
+#include "browser_watcher.h"
 
 static const wchar_t* MAIN_WINDOW_CLASS = L"TaskbarKeyIndicator_MsgWnd";
 static const wchar_t* MUTEX_NAME = L"TaskbarKeyIndicator_SingleInstance_Mutex";
@@ -66,6 +67,7 @@ private:
     AppConfig m_config;
     TaskbarOverlayManager m_overlayMgr;
     DeviceWatcher m_deviceWatcher;
+    BrowserWatcher m_browserWatcher;
     std::vector<KeyboardDeviceInfo> m_cachedKeyboards;
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -97,6 +99,7 @@ Application::~Application() {
         m_hCurrentTrayIcon = NULL;
     }
     Shell_NotifyIconW(NIM_DELETE, &m_nid);
+    m_browserWatcher.Cleanup();
     if (m_hWnd) {
         KillTimer(m_hWnd, TIMER_WATCHDOG);
     }
@@ -218,14 +221,15 @@ void Application::ShowContextMenu() {
     GetCursorPos(&pt);
 
     HMENU hMenu = CreatePopupMenu();
-    bool isConnected = m_deviceWatcher.IsTargetConnected();
-    std::wstring targetName = m_deviceWatcher.GetCurrentTargetName();
+    bool hasBrowser = m_browserWatcher.CheckCurrentState();
+    bool isConnected = hasBrowser ? m_browserWatcher.IsConnected() : m_deviceWatcher.IsTargetConnected();
+    std::wstring targetName = hasBrowser ? m_browserWatcher.GetMatchedTitle() : m_deviceWatcher.GetCurrentTargetName();
 
     // 1. 상태 헤더
-    std::wstring statusStr = isConnected ? L"● 상태: 유선 연결됨 (PC 활성)" : L"○ 상태: 무선 전환됨 (유선 분리)";
+    std::wstring statusStr = isConnected ? L"● 상태: PC 연결됨 (초록 LED)" : L"○ 상태: 모바일 전환됨 (적색 LED)";
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_STATUS_HEADER, statusStr.c_str());
 
-    std::wstring kbDesc = L"  타겟: " + targetName;
+    std::wstring kbDesc = hasBrowser ? (L"  동기화: " + targetName) : (L"  타겟: " + targetName);
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_TARGET_NAME, kbDesc.c_str());
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_1, NULL);
@@ -540,8 +544,18 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     m_deviceWatcher.Initialize(m_hWnd);
 
-    // 8. 초기 상태 즉시 반영
-    UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+    // 8. 브라우저 실시간(0ms) 타이틀 와처 초기화 및 콜백 연결 (최우선 감지 엔진)
+    m_browserWatcher.SetStateCallback([this](bool isConnected, const std::wstring& title) {
+        this->UpdateState(isConnected, title);
+    });
+    m_browserWatcher.Initialize(m_hWnd);
+
+    // 브라우저 상태가 감지되면 브라우저 상태를 우선 반영, 없으면 디바이스 상태 반영
+    if (m_browserWatcher.CheckCurrentState()) {
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
+    } else {
+        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+    }
 
     // 9. 1초 주기 경량 워치독 타이머 시작 (PnP 누락/지연 방지 안전망)
     SetTimer(m_hWnd, TIMER_WATCHDOG, 1000, NULL);
