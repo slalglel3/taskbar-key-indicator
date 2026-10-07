@@ -2,12 +2,10 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <string>
-#include <vector>
 
 #include "logger.h"
 #include "config.h"
 #include "taskbar_overlay.h"
-#include "device_watcher.h"
 #include "browser_watcher.h"
 
 static const wchar_t* MAIN_WINDOW_CLASS = L"TaskbarKeyIndicator_MsgWnd";
@@ -15,37 +13,29 @@ static const wchar_t* MUTEX_NAME = L"TaskbarKeyIndicator_SingleInstance_Mutex";
 static const UINT WM_TRAYICON_MSG = WM_APP + 101;
 static const UINT_PTR TIMER_WATCHDOG = 3001;
 
-// 메뉴 ID 상수
+// 트레이 메뉴 ID 상수
 enum MenuIDs {
     IDM_STATUS_HEADER = 1001,
-    IDM_TARGET_NAME,
+    IDM_SYNC_TITLE,
     IDM_SEPARATOR_1,
     IDM_TEST_OVERLAY,
     IDM_OPEN_LOG,
-    IDM_SCAN_ALL_DEVICES,
-    IDM_PROBE_DIAGNOSTIC,
-    IDM_SNAPSHOT_SAVE_A,
-    IDM_SNAPSHOT_COMPARE_B,
-    IDM_RESET_BASELINE,
     IDM_SEPARATOR_2,
-    IDM_AUTO_DETECT_KB,
-    IDM_KB_LIST_BASE = 2000, // 감지된 개별 키보드 선택 메뉴 (동적 2000 ~ 2099)
-    IDM_SEPARATOR_3 = 2100,
     IDM_COLOR_RED,
     IDM_COLOR_ORANGE,
     IDM_COLOR_AMBER,
     IDM_COLOR_PINK,
     IDM_COLOR_BLUE,
-    IDM_SEPARATOR_4,
+    IDM_SEPARATOR_3,
     IDM_THICKNESS_2,
     IDM_THICKNESS_3,
     IDM_THICKNESS_4,
     IDM_THICKNESS_5,
-    IDM_SEPARATOR_5,
+    IDM_SEPARATOR_4,
     IDM_SHOW_WHEN_CONNECTED,
     IDM_AUTO_START,
     IDM_OPEN_CONFIG,
-    IDM_SEPARATOR_6,
+    IDM_SEPARATOR_5,
     IDM_EXIT
 };
 
@@ -66,14 +56,12 @@ private:
 
     AppConfig m_config;
     TaskbarOverlayManager m_overlayMgr;
-    DeviceWatcher m_deviceWatcher;
     BrowserWatcher m_browserWatcher;
-    std::vector<KeyboardDeviceInfo> m_cachedKeyboards;
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     bool Initialize(HINSTANCE hInstance);
-    void UpdateState(bool isConnected, const std::wstring& devName);
+    void UpdateState(bool isConnected, const std::wstring& title);
     void SetupTrayIcon();
     void UpdateTrayIcon(bool isConnected);
     void ShowContextMenu();
@@ -92,6 +80,7 @@ Application::Application()
     memset(&m_nid, 0, sizeof(m_nid));
     g_app = this;
 }
+
 Application::~Application() {
     Logger::Log(L"[App] Shutting down application...");
     if (m_hCurrentTrayIcon) {
@@ -109,7 +98,6 @@ Application::~Application() {
     }
     Logger::Close();
 }
-
 
 HICON Application::CreateLedIcon(COLORREF color) {
     HDC hdcScreen = GetDC(NULL);
@@ -201,9 +189,9 @@ void Application::UpdateTrayIcon(bool isConnected) {
     Shell_NotifyIconW(NIM_MODIFY, &m_nid);
 }
 
-void Application::UpdateState(bool isConnected, const std::wstring& devName) {
-    Logger::Log(L"[App] UpdateState -> Connected: %s, Device: %s",
-        isConnected ? L"YES" : L"NO", devName.c_str());
+void Application::UpdateState(bool isConnected, const std::wstring& title) {
+    Logger::Log(L"[App] UpdateState -> Connected: %s, Title: %s",
+        isConnected ? L"YES" : L"NO", title.c_str());
 
     m_overlayMgr.SetState(
         isConnected,
@@ -221,56 +209,26 @@ void Application::ShowContextMenu() {
     GetCursorPos(&pt);
 
     HMENU hMenu = CreatePopupMenu();
-    bool hasBrowser = m_browserWatcher.CheckCurrentState();
-    bool isConnected = hasBrowser ? m_browserWatcher.IsConnected() : m_deviceWatcher.IsTargetConnected();
-    std::wstring targetName = hasBrowser ? m_browserWatcher.GetMatchedTitle() : m_deviceWatcher.GetCurrentTargetName();
+    m_browserWatcher.CheckCurrentState();
+    bool isConnected = m_browserWatcher.IsConnected();
+    std::wstring matchedTitle = m_browserWatcher.GetMatchedTitle();
 
     // 1. 상태 헤더
     std::wstring statusStr = isConnected ? L"● 상태: PC 연결됨 (초록 LED)" : L"○ 상태: 모바일 전환됨 (적색 LED)";
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_STATUS_HEADER, statusStr.c_str());
 
-    std::wstring kbDesc = hasBrowser ? (L"  동기화: " + targetName) : (L"  타겟: " + targetName);
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_TARGET_NAME, kbDesc.c_str());
+    std::wstring syncDesc = matchedTitle.empty() ? L"  동기화: [대기 중]" : (L"  동기화: " + matchedTitle);
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | MF_GRAYED, IDM_SYNC_TITLE, syncDesc.c_str());
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_1, NULL);
 
-    // 2. 진단 및 테스트 기능 (핵심!)
+    // 2. 테스트 및 로그
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SCAN_ALL_DEVICES, L"🔍 모든 입력 장치 & ForceLink 전수 스캔 (로그 즉시 열기)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_PROBE_DIAGNOSTIC, L"🔬 5대 센서 & HID 패킷 심층 진단 실행");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SNAPSHOT_SAVE_A, L"📸 [1단계] 전체 8개 장치 스냅샷 저장 (PC 연결 상태)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SNAPSHOT_COMPARE_B, L"🔍 [2단계] 전체 장치 Diff 대조 분석 (전환 후 클릭)");
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_RESET_BASELINE, L"🔄 현재 연결 상태를 기준(Baseline)으로 재설정");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 로그 열기 (debug.log)");
 
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_2, NULL);
 
-    // 3. 키보드 타겟 선택 서브메뉴
-    m_cachedKeyboards = m_deviceWatcher.GetConnectedKeyboards();
-    HMENU hKbMenu = CreatePopupMenu();
-    InsertMenuW(hKbMenu, -1, MF_BYPOSITION | MF_STRING | (m_deviceWatcher.IsAutoDetect() ? MF_CHECKED : 0),
-        IDM_AUTO_DETECT_KB, L"자동 감지 모드 (Auto-Detect)");
-
-    if (!m_cachedKeyboards.empty()) {
-        InsertMenuW(hKbMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-        for (size_t i = 0; i < m_cachedKeyboards.size() && i < 10; ++i) {
-            const auto& kb = m_cachedKeyboards[i];
-            bool isCurrentTarget = (!m_deviceWatcher.IsAutoDetect() &&
-                kb.vid == m_deviceWatcher.GetTargetVid() &&
-                kb.pid == m_deviceWatcher.GetTargetPid());
-
-            std::wstring itemText = L"[" + kb.vid + L":" + kb.pid + L"] " + kb.friendlyName;
-            InsertMenuW(hKbMenu, -1, MF_BYPOSITION | MF_STRING | (isCurrentTarget ? MF_CHECKED : 0),
-                IDM_KB_LIST_BASE + (UINT)i, itemText.c_str());
-        }
-    }
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hKbMenu, L"🎯 감시할 키보드 선택");
-
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_3, NULL);
-
-    // 4. LED 색상 서브메뉴
+    // 3. LED 색상 서브메뉴
     HMENU hColorMenu = CreatePopupMenu();
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 45, 85) ? MF_CHECKED : 0), IDM_COLOR_RED, L"네온 레드 (#FF2D55) [기본]");
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(255, 149, 0) ? MF_CHECKED : 0), IDM_COLOR_ORANGE, L"네온 오렌지 (#FF9500)");
@@ -279,7 +237,7 @@ void Application::ShowContextMenu() {
     InsertMenuW(hColorMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.disconnectedColor == RGB(0, 122, 255) ? MF_CHECKED : 0), IDM_COLOR_BLUE, L"네온 블루 (#007AFF)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hColorMenu, L"LED 바 색상 설정");
 
-    // 5. LED 바 두께 서브메뉴
+    // 4. LED 바 두께 서브메뉴
     HMENU hThickMenu = CreatePopupMenu();
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 2 ? MF_CHECKED : 0), IDM_THICKNESS_2, L"2 픽셀");
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 3 ? MF_CHECKED : 0), IDM_THICKNESS_3, L"3 픽셀 [권장]");
@@ -287,15 +245,15 @@ void Application::ShowContextMenu() {
     InsertMenuW(hThickMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.barThickness == 5 ? MF_CHECKED : 0), IDM_THICKNESS_5, L"5 픽셀");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hThickMenu, L"LED 바 두께 설정");
 
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_4, NULL);
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_3, NULL);
 
-    // 6. 옵션
+    // 5. 옵션
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.showWhenConnected ? MF_CHECKED : 0), IDM_SHOW_WHEN_CONNECTED, L"유선 연결 시에도 초록 LED 표시");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING | (m_config.autoStart ? MF_CHECKED : 0), IDM_AUTO_START, L"윈도우 시작 시 자동 실행");
 
-    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_5, NULL);
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, IDM_SEPARATOR_4, NULL);
 
-    // 7. 설정 파일 열기 & 종료
+    // 6. 설정 파일 열기 & 종료
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_CONFIG, L"설정 파일 열기 (config.ini)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_EXIT, L"종료 (Exit)");
 
@@ -306,19 +264,6 @@ void Application::ShowContextMenu() {
 
     if (cmd == 0) return;
 
-    if (cmd >= IDM_KB_LIST_BASE && cmd < IDM_KB_LIST_BASE + (int)m_cachedKeyboards.size()) {
-        size_t idx = cmd - IDM_KB_LIST_BASE;
-        const auto& kb = m_cachedKeyboards[idx];
-        m_config.targetVid = kb.vid;
-        m_config.targetPid = kb.pid;
-        m_config.targetDeviceName = kb.friendlyName;
-        m_config.autoDetect = false;
-        m_deviceWatcher.SetTarget(kb.vid, kb.pid, kb.friendlyName);
-        ConfigManager::SaveConfig(m_config);
-        Logger::Log(L"[Tray] User locked target keyboard to VID_%s PID_%s", kb.vid.c_str(), kb.pid.c_str());
-        return;
-    }
-
     switch (cmd) {
     case IDM_TEST_OVERLAY:
         m_overlayMgr.ForceShowTest(5000);
@@ -328,63 +273,30 @@ void Application::ShowContextMenu() {
         Logger::OpenLogFile();
         break;
 
-    case IDM_SCAN_ALL_DEVICES:
-        m_deviceWatcher.ScanAllInputDevices(true);
-        Logger::OpenLogFile();
-        break;
-
-    case IDM_PROBE_DIAGNOSTIC:
-        m_deviceWatcher.ProbeTargetDevice(true);
-        MessageBoxW(m_hWnd, L"5대 센서 하드웨어 정밀 진단이 완료되어 debug.log에 기록되었습니다.\n'실시간 진단 로그 열기'를 눌러 센서별 결과를 확인하세요.", L"정밀 진단 완료", MB_OK | MB_ICONINFORMATION);
-        break;
-
-    case IDM_SNAPSHOT_SAVE_A:
-        m_deviceWatcher.SaveSnapshotA();
-        MessageBoxW(m_hWnd, L"[1단계 완료]\n현재 PC 연결 상태에서 전체 8개 장치의 모든 하드웨어 상태 스냅샷이 저장되었습니다.\n\n이제 키보드를 모바일(BT)로 전환하신 후,\n'[2단계] 전체 장치 Diff 대조 분석'을 클릭하세요.", L"1단계 스냅샷 저장 완료", MB_OK | MB_ICONINFORMATION);
-        break;
-
-    case IDM_SNAPSHOT_COMPARE_B:
-        m_deviceWatcher.CompareSnapshotB();
-        Logger::OpenLogFile();
-        break;
-
-    case IDM_RESET_BASELINE:
-        m_deviceWatcher.ResetBaseline();
-        break;
-
-    case IDM_AUTO_DETECT_KB:
-        m_config.autoDetect = true;
-        m_config.targetVid.clear();
-        m_config.targetPid.clear();
-        m_config.targetDeviceName.clear();
-        m_deviceWatcher.SetAutoDetect(true);
-        ConfigManager::SaveConfig(m_config);
-        break;
-
     case IDM_COLOR_RED:
         m_config.disconnectedColor = RGB(255, 45, 85);
         ConfigManager::SaveConfig(m_config);
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
     case IDM_COLOR_ORANGE:
         m_config.disconnectedColor = RGB(255, 149, 0);
         ConfigManager::SaveConfig(m_config);
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
     case IDM_COLOR_AMBER:
         m_config.disconnectedColor = RGB(255, 204, 0);
         ConfigManager::SaveConfig(m_config);
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
     case IDM_COLOR_PINK:
         m_config.disconnectedColor = RGB(255, 55, 95);
         ConfigManager::SaveConfig(m_config);
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
     case IDM_COLOR_BLUE:
         m_config.disconnectedColor = RGB(0, 122, 255);
         ConfigManager::SaveConfig(m_config);
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
 
     case IDM_THICKNESS_2:
@@ -399,7 +311,7 @@ void Application::ShowContextMenu() {
     case IDM_SHOW_WHEN_CONNECTED:
         m_config.showWhenConnected = !m_config.showWhenConnected;
         ConfigManager::SaveConfig(m_config);
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
+        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
         break;
 
     case IDM_AUTO_START:
@@ -440,11 +352,6 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         return 0;
 
-    case WM_DEVICECHANGE:
-        Logger::Log(L"[WndProc] WM_DEVICECHANGE intercepted by Top-level Window.");
-        g_app->m_deviceWatcher.OnDeviceChange(wParam, lParam);
-        return TRUE;
-
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
         Logger::Log(L"[WndProc] Display/Setting change detected. Updating overlay positions.");
@@ -459,7 +366,7 @@ LRESULT CALLBACK Application::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
     case WM_TIMER:
         if (wParam == TIMER_WATCHDOG) {
-            g_app->m_deviceWatcher.CheckConnectionState();
+            g_app->m_browserWatcher.CheckCurrentState();
             if (g_app->m_overlayMgr.IsOverlayVisible()) {
                 g_app->m_overlayMgr.UpdatePositions();
             }
@@ -482,7 +389,7 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 1. 로거 초기화 (가장 먼저 실행)
     Logger::Init();
-    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.0.1...");
+    Logger::Log(L"[App] Initializing TaskbarKeyIndicator v1.2.0 (Lean Browser-Hook Edition)...");
 
     // 2. 단일 인스턴스 중복 실행 방지
     m_hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
@@ -494,11 +401,10 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 3. 설정 로드
     m_config = ConfigManager::LoadConfig();
-    Logger::Log(L"[App] Config loaded: AutoDetect=%d, TargetVID=%s, TargetPID=%s, BarThickness=%d",
-        m_config.autoDetect ? 1 : 0, m_config.targetVid.c_str(), m_config.targetPid.c_str(), m_config.barThickness);
+    Logger::Log(L"[App] Config loaded: BarThickness=%d, ShowWhenConnected=%d",
+        m_config.barThickness, m_config.showWhenConnected ? 1 : 0);
 
-    // 4. 최상위 숨김 윈도우 생성 (WS_POPUP, 0,0,0,0)
-    // [중요] HWND_MESSAGE는 WM_DEVICECHANGE 브로드캐스트를 받지 못하므로, 반드시 최상위 윈도우여야 함!
+    // 4. 최상위 숨김 메시지 윈도우 생성 (WS_POPUP, 0,0,0,0)
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
     wc.lpfnWndProc = Application::WndProc;
     wc.hInstance = m_hInstance;
@@ -531,33 +437,17 @@ bool Application::Initialize(HINSTANCE hInstance) {
     // 6. 트레이 아이콘 설정
     SetupTrayIcon();
 
-    // 7. 디바이스 와처 초기화 및 콜백 연결
-    m_deviceWatcher.SetStateCallback([this](bool isConnected, const std::wstring& devName) {
-        this->UpdateState(isConnected, devName);
-    });
-
-    if (!m_config.autoDetect && !m_config.targetVid.empty() && !m_config.targetPid.empty()) {
-        m_deviceWatcher.SetTarget(m_config.targetVid, m_config.targetPid, m_config.targetDeviceName);
-    } else {
-        m_deviceWatcher.SetAutoDetect(true);
-    }
-
-    m_deviceWatcher.Initialize(m_hWnd);
-
-    // 8. 브라우저 실시간(0ms) 타이틀 와처 초기화 및 콜백 연결 (최우선 감지 엔진)
+    // 7. 브라우저 실시간(0ms) 타이틀 와처 초기화 및 콜백 연결 (단일 순수 엔진)
     m_browserWatcher.SetStateCallback([this](bool isConnected, const std::wstring& title) {
         this->UpdateState(isConnected, title);
     });
     m_browserWatcher.Initialize(m_hWnd);
 
-    // 브라우저 상태가 감지되면 브라우저 상태를 우선 반영, 없으면 디바이스 상태 반영
-    if (m_browserWatcher.CheckCurrentState()) {
-        UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
-    } else {
-        UpdateState(m_deviceWatcher.IsTargetConnected(), m_deviceWatcher.GetCurrentTargetName());
-    }
+    // 초기 브라우저 타이틀 상태 스캔 및 즉시 반영
+    m_browserWatcher.CheckCurrentState();
+    UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
 
-    // 9. 1초 주기 경량 워치독 타이머 시작 (PnP 누락/지연 방지 안전망)
+    // 8. 1초 주기 경량 워치독 타이머 시작 (보조 동기화 및 오버레이 위치 검증)
     SetTimer(m_hWnd, TIMER_WATCHDOG, 1000, NULL);
 
     Logger::Log(L"[App] Initialization completed successfully.");

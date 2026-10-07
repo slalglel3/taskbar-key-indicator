@@ -50,11 +50,7 @@ AppConfig ConfigManager::LoadConfig() {
     cfg.connectedColor = RGB(50, 215, 75);     // 네온 그린 (#32D74B)
     cfg.showWhenConnected = false;             // 유선 연결 시에는 평상시 작업표시줄 유지 (숨김)
     cfg.barThickness = 3;                      // 3px
-    cfg.targetVid = L"";
-    cfg.targetPid = L"";
-    cfg.targetDeviceName = L"";
     cfg.autoStart = IsAutoStartEnabled();
-    cfg.autoDetect = true;
 
     std::wstring iniPath = GetConfigPath();
     if (GetFileAttributesW(iniPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -82,19 +78,6 @@ AppConfig ConfigManager::LoadConfig() {
     if (th > 10) th = 10;
     cfg.barThickness = th;
 
-    // AutoDetect
-    cfg.autoDetect = (GetPrivateProfileIntW(SECTION_GENERAL, L"AutoDetect", 1, iniPath.c_str()) != 0);
-
-    // Target VID / PID
-    GetPrivateProfileStringW(SECTION_GENERAL, L"TargetVid", L"", buf, 256, iniPath.c_str());
-    cfg.targetVid = buf;
-
-    GetPrivateProfileStringW(SECTION_GENERAL, L"TargetPid", L"", buf, 256, iniPath.c_str());
-    cfg.targetPid = buf;
-
-    GetPrivateProfileStringW(SECTION_GENERAL, L"TargetDeviceName", L"", buf, 256, iniPath.c_str());
-    cfg.targetDeviceName = buf;
-
     return cfg;
 }
 
@@ -105,10 +88,6 @@ void ConfigManager::SaveConfig(const AppConfig& cfg) {
     WritePrivateProfileStringW(SECTION_GENERAL, L"ConnectedColor", ColorToHex(cfg.connectedColor).c_str(), iniPath.c_str());
     WritePrivateProfileStringW(SECTION_GENERAL, L"ShowWhenConnected", cfg.showWhenConnected ? L"1" : L"0", iniPath.c_str());
     WritePrivateProfileStringW(SECTION_GENERAL, L"BarThickness", std::to_wstring(cfg.barThickness).c_str(), iniPath.c_str());
-    WritePrivateProfileStringW(SECTION_GENERAL, L"AutoDetect", cfg.autoDetect ? L"1" : L"0", iniPath.c_str());
-    WritePrivateProfileStringW(SECTION_GENERAL, L"TargetVid", cfg.targetVid.c_str(), iniPath.c_str());
-    WritePrivateProfileStringW(SECTION_GENERAL, L"TargetPid", cfg.targetPid.c_str(), iniPath.c_str());
-    WritePrivateProfileStringW(SECTION_GENERAL, L"TargetDeviceName", cfg.targetDeviceName.c_str(), iniPath.c_str());
 }
 
 bool ConfigManager::IsAutoStartEnabled() {
