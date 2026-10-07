@@ -57,6 +57,19 @@ struct DeviceProbeResult {
     std::vector<HidInterfaceProbeInfo> hidInterfaces; // 센서 5: 각 HID 인터페이스별 심층 프로브
 };
 
+struct DetailedDeviceInfo {
+    std::wstring friendlyName;
+    std::wstring description;
+    std::wstring hardwareId;
+    std::wstring vid;
+    std::wstring pid;
+    std::wstring devicePath;
+    std::wstring instanceId;
+    ULONG status = 0;
+    ULONG problem = 0;
+    bool isForceLinkCandidate = false;
+};
+
 class DeviceWatcher {
 public:
     DeviceWatcher();
@@ -73,6 +86,9 @@ public:
 
     // 5대 센서 전방위 정밀 진단 실행 및 상세 로깅
     DeviceProbeResult ProbeTargetDevice(bool logDetailed = true);
+
+    // 시스템의 모든 입력 장치 및 ForceLink 동글 전수 상세 검색 및 인벤토리 덤프
+    std::vector<DetailedDeviceInfo> ScanAllInputDevices(bool logDetailed = true);
 
     // 감지된 외장 키보드 목록 반환
     std::vector<KeyboardDeviceInfo> GetConnectedKeyboards();

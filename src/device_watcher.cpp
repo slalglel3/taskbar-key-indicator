@@ -107,6 +107,123 @@ KeyboardDeviceInfo DeviceWatcher::ParseDevicePath(const std::wstring& path) {
     return info;
 }
 
+std::vector<DetailedDeviceInfo> DeviceWatcher::ScanAllInputDevices(bool logDetailed) {
+    std::vector<DetailedDeviceInfo> result;
+
+    const wchar_t* enumerators[] = { L"USB", L"HID" };
+
+    for (const auto* enumerator : enumerators) {
+        HDEVINFO hDevInfo = SetupDiGetClassDevsW(
+            NULL,
+            enumerator,
+            NULL,
+            DIGCF_ALLCLASSES | DIGCF_PRESENT
+        );
+
+        if (hDevInfo == INVALID_HANDLE_VALUE) continue;
+
+        SP_DEVINFO_DATA devInfoData = { sizeof(SP_DEVINFO_DATA) };
+
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &devInfoData); ++i) {
+            DetailedDeviceInfo dev;
+
+            // 1. Device Description
+            wchar_t descBuf[256] = { 0 };
+            if (SetupDiGetDeviceRegistryPropertyW(hDevInfo, &devInfoData, SPDRP_DEVICEDESC, NULL, (PBYTE)descBuf, sizeof(descBuf), NULL)) {
+                dev.description = descBuf;
+            }
+
+            // 2. Friendly Name
+            wchar_t fnBuf[256] = { 0 };
+            if (SetupDiGetDeviceRegistryPropertyW(hDevInfo, &devInfoData, SPDRP_FRIENDLYNAME, NULL, (PBYTE)fnBuf, sizeof(fnBuf), NULL)) {
+                dev.friendlyName = fnBuf;
+            } else if (!dev.description.empty()) {
+                dev.friendlyName = dev.description;
+            }
+
+            // 3. Hardware ID
+            wchar_t hwIdBuf[512] = { 0 };
+            if (SetupDiGetDeviceRegistryPropertyW(hDevInfo, &devInfoData, SPDRP_HARDWAREID, NULL, (PBYTE)hwIdBuf, sizeof(hwIdBuf), NULL)) {
+                dev.hardwareId = hwIdBuf;
+            }
+
+            // 4. Instance ID
+            wchar_t instId[MAX_DEVICE_ID_LEN] = { 0 };
+            if (CM_Get_Device_IDW(devInfoData.DevInst, instId, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS) {
+                dev.instanceId = instId;
+            }
+
+            // 5. DevNode Status
+            ULONG status = 0, problem = 0;
+            if (CM_Get_DevNode_Status(&status, &problem, devInfoData.DevInst, 0) == CR_SUCCESS) {
+                dev.status = status;
+                dev.problem = problem;
+            }
+
+            // VID / PID 추출 (hardwareId 또는 instanceId에서)
+            std::wstring searchStr = dev.hardwareId + L" " + dev.instanceId;
+            std::wstring upperStr = searchStr;
+            std::transform(upperStr.begin(), upperStr.end(), upperStr.begin(), ::towupper);
+
+            size_t vidPos = upperStr.find(L"VID_");
+            if (vidPos != std::wstring::npos && vidPos + 8 <= upperStr.length()) {
+                dev.vid = upperStr.substr(vidPos + 4, 4);
+            }
+            size_t pidPos = upperStr.find(L"PID_");
+            if (pidPos != std::wstring::npos && pidPos + 8 <= upperStr.length()) {
+                dev.pid = upperStr.substr(pidPos + 4, 4);
+            }
+
+            if (dev.vid.empty() || dev.pid.empty()) continue;
+
+            // ForceLink 및 키보드/동글 관련 키워드 매칭
+            std::wstring matchTarget = dev.friendlyName + L" " + dev.description + L" " + dev.hardwareId;
+            std::transform(matchTarget.begin(), matchTarget.end(), matchTarget.begin(), ::towupper);
+            if (matchTarget.find(L"FORCE") != std::wstring::npos ||
+                matchTarget.find(L"LINK") != std::wstring::npos ||
+                matchTarget.find(L"HANSUNG") != std::wstring::npos ||
+                matchTarget.find(L"GK893") != std::wstring::npos ||
+                matchTarget.find(L"DONGLE") != std::wstring::npos ||
+                matchTarget.find(L"RECEIVER") != std::wstring::npos ||
+                matchTarget.find(L"WIRELESS") != std::wstring::npos) {
+                dev.isForceLinkCandidate = true;
+            }
+
+            // 중복 방지 (InstanceId 기준)
+            bool dup = false;
+            for (const auto& item : result) {
+                if (item.instanceId == dev.instanceId) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                result.push_back(dev);
+            }
+        }
+        SetupDiDestroyDeviceInfoList(hDevInfo);
+    }
+
+    if (logDetailed) {
+        Logger::Log(L"============================================================");
+        Logger::Log(L"[Inventory] === Connected Input & USB Devices (%zu found) ===", result.size());
+        for (size_t i = 0; i < result.size(); ++i) {
+            const auto& d = result[i];
+            Logger::Log(L"  #%zu [%s] VID_%s PID_%s %s",
+                i + 1,
+                d.friendlyName.c_str(),
+                d.vid.c_str(), d.pid.c_str(),
+                d.isForceLinkCandidate ? L"★ [ForceLink / Keyboard Match!]" : L"");
+            Logger::Log(L"      Desc: %s | Status: 0x%08X (Prob: %lu)",
+                d.description.c_str(), d.status, d.problem);
+            Logger::Log(L"      HWID: %s", d.hardwareId.c_str());
+        }
+        Logger::Log(L"============================================================");
+    }
+
+    return result;
+}
+
 std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
     std::vector<KeyboardDeviceInfo> list;
 
@@ -120,6 +237,9 @@ std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
         return list;
     }
 
+    // 시스템 장치 인벤토리 스캔으로 친화적 이름(Friendly Name) 및 ForceLink 태그 매핑 준비
+    std::vector<DetailedDeviceInfo> inventory = ScanAllInputDevices(false);
+
     for (const auto& rawDev : rawList) {
         if (rawDev.dwType != RIM_TYPEKEYBOARD) continue;
 
@@ -131,6 +251,19 @@ std::vector<KeyboardDeviceInfo> DeviceWatcher::GetConnectedKeyboards() {
         if (GetRawInputDeviceInfoW(rawDev.hDevice, RIDI_DEVICENAME, nameBuf.data(), &nameSize) > 0) {
             std::wstring devPath(nameBuf.data());
             KeyboardDeviceInfo info = ParseDevicePath(devPath);
+
+            // 인벤토리에서 실제 장치 이름(Friendly Name) 및 ForceLink 매칭 확인
+            for (const auto& inv : inventory) {
+                if (!info.vid.empty() && inv.vid == info.vid && inv.pid == info.pid) {
+                    if (!inv.friendlyName.empty()) {
+                        info.friendlyName = inv.friendlyName;
+                        if (inv.isForceLinkCandidate) {
+                            info.friendlyName += L" ★[ForceLink]";
+                        }
+                    }
+                    break;
+                }
+            }
 
             bool alreadyExists = false;
             for (const auto& item : list) {

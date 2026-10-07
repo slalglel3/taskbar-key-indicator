@@ -21,6 +21,7 @@ enum MenuIDs {
     IDM_SEPARATOR_1,
     IDM_TEST_OVERLAY,
     IDM_OPEN_LOG,
+    IDM_SCAN_ALL_DEVICES,
     IDM_PROBE_DIAGNOSTIC,
     IDM_RESET_BASELINE,
     IDM_SEPARATOR_2,
@@ -230,6 +231,7 @@ void Application::ShowContextMenu() {
     // 2. 진단 및 테스트 기능 (핵심!)
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_TEST_OVERLAY, L"⚡ LED 바 강제 테스트 (5초간 점등)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_OPEN_LOG, L"📋 실시간 진단 로그 열기 (debug.log)");
+    InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_SCAN_ALL_DEVICES, L"🔍 모든 입력 장치 & ForceLink 전수 스캔 (로그 즉시 열기)");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_PROBE_DIAGNOSTIC, L"🔬 5대 센서 & HID 패킷 심층 진단 실행");
     InsertMenuW(hMenu, -1, MF_BYPOSITION | MF_STRING, IDM_RESET_BASELINE, L"🔄 현재 연결 상태를 기준(Baseline)으로 재설정");
 
@@ -313,6 +315,11 @@ void Application::ShowContextMenu() {
         break;
 
     case IDM_OPEN_LOG:
+        Logger::OpenLogFile();
+        break;
+
+    case IDM_SCAN_ALL_DEVICES:
+        m_deviceWatcher.ScanAllInputDevices(true);
         Logger::OpenLogFile();
         break;
 
