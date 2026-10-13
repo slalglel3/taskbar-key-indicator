@@ -59,6 +59,7 @@ private:
     UINT m_wmTaskbarCreated;
     NOTIFYICONDATAW m_nid;
     HICON m_hCurrentTrayIcon;
+    HWINEVENTHOOK m_hFgHook;
     bool m_cleanedUp;
 
     AppConfig m_config;
@@ -66,6 +67,15 @@ private:
     BrowserWatcher m_browserWatcher;
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static void CALLBACK ForegroundEventProc(
+        HWINEVENTHOOK hWinEventHook,
+        DWORD event,
+        HWND hwnd,
+        LONG idObject,
+        LONG idChild,
+        DWORD idEventThread,
+        DWORD dwmsEventTime
+    );
 
     bool Initialize(HINSTANCE hInstance);
     void UpdateState(bool isConnected, const std::wstring& title);
@@ -83,6 +93,7 @@ Application::Application()
     , m_hMutex(NULL)
     , m_wmTaskbarCreated(0)
     , m_hCurrentTrayIcon(NULL)
+    , m_hFgHook(NULL)
     , m_cleanedUp(false)
 {
     memset(&m_nid, 0, sizeof(m_nid));
@@ -103,6 +114,11 @@ void Application::Cleanup() {
         m_hCurrentTrayIcon = NULL;
     }
     Shell_NotifyIconW(NIM_DELETE, &m_nid);
+    if (m_hFgHook) {
+        UnhookWinEvent(m_hFgHook);
+        m_hFgHook = NULL;
+        Logger::Log(L"[App] Foreground WinEventHook unhooked cleanly.");
+    }
     m_overlayMgr.Cleanup();
     m_browserWatcher.Cleanup();
     if (m_hWnd) {
@@ -566,11 +582,38 @@ bool Application::Initialize(HINSTANCE hInstance) {
     m_browserWatcher.CheckCurrentState();
     UpdateState(m_browserWatcher.IsConnected(), m_browserWatcher.GetMatchedTitle());
 
-    // 8. 1초 주기 경량 워치독 타이머 시작
+    // 8. 포그라운드 창 전환 감지 훅 등록 (개발 VDI <-> 기본 VDI 창 전환 시 0ms 즉각 LED 복원!)
+    m_hFgHook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_FOREGROUND,
+        NULL,
+        Application::ForegroundEventProc,
+        0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
+    );
+    if (m_hFgHook) {
+        Logger::Log(L"[App] Foreground WinEventHook registered (0ms Active Window Switch Recovery).");
+    }
+
+    // 9. 1초 주기 경량 워치독 타이머 시작
     SetTimer(m_hWnd, TIMER_WATCHDOG, 1000, NULL);
 
     Logger::Log(L"[App] Initialization completed successfully.");
     return true;
+}
+
+void CALLBACK Application::ForegroundEventProc(
+    HWINEVENTHOOK hWinEventHook,
+    DWORD event,
+    HWND hwnd,
+    LONG idObject,
+    LONG idChild,
+    DWORD idEventThread,
+    DWORD dwmsEventTime
+) {
+    if (g_app && g_app->m_overlayMgr.IsOverlayVisible()) {
+        g_app->m_overlayMgr.UpdatePositions();
+    }
 }
 
 int Application::Run(HINSTANCE hInstance) {

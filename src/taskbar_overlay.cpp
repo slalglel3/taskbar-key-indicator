@@ -310,12 +310,42 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
     ReleaseDC(NULL, hdcScreen);
 }
 
+// 화면 전면에 다른 앱(개발 VDI 전체화면 등)이 모니터를 덮고 있는지 감지
+static bool IsForegroundFullScreen() {
+    HWND hFg = GetForegroundWindow();
+    if (!hFg || hFg == GetDesktopWindow() || hFg == GetShellWindow()) return false;
+
+    wchar_t cls[64] = { 0 };
+    if (GetClassNameW(hFg, cls, 64)) {
+        if (wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0) {
+            return false;
+        }
+    }
+
+    RECT rcWnd;
+    if (!GetWindowRect(hFg, &rcWnd)) return false;
+
+    HMONITOR hMon = MonitorFromWindow(hFg, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(MONITORINFO) };
+    if (!GetMonitorInfoW(hMon, &mi)) return false;
+
+    // 포그라운드 창이 해당 모니터 전체 영역을 덮고 있는가?
+    return (rcWnd.left <= mi.rcMonitor.left && rcWnd.top <= mi.rcMonitor.top &&
+            rcWnd.right >= mi.rcMonitor.right && rcWnd.bottom >= mi.rcMonitor.bottom);
+}
+
 void TaskbarOverlayManager::UpdatePositions() {
     bool visible = m_shouldShow || m_isTesting;
 
     // 녹색(PC 유선)일 때는 항상 상단 LED 바 모드,
     // 붉은색(모바일 전환 또는 테스트)일 때만 사용자가 선택한 스타일(틴트 vs LED 바) 적용
     bool isFullTint = (!m_keyboardConnected || m_isTesting) && (m_disconnectedStyle == 1);
+    bool isFgFullScreen = IsForegroundFullScreen();
+
+    // 전체화면(개발 VDI)에서 기본 VDI로 복귀하는 순간 감지 (DWM 오클루전 서피스 즉시 복원용)
+    static bool s_lastFgFullScreen = false;
+    bool returnedFromFullScreen = (s_lastFgFullScreen && !isFgFullScreen);
+    s_lastFgFullScreen = isFgFullScreen;
 
     for (auto& info : m_overlays) {
         if (!info.hTargetTray || !IsWindow(info.hTargetTray)) continue;
@@ -371,16 +401,19 @@ void TaskbarOverlayManager::UpdatePositions() {
         }
 
         if (visible) {
-            // [스마트 캐싱 최적화]
-            // 좌표, 크기, 색상, 틴트 모드, 가시성이 동일하면 매초 불필요한 SetWindowPos 및 DWM 리드로잉 생략!
-            // 불필요한 Z-Order 재배치를 원천 차단하여 다른 전체화면 앱(VDI 등)과의 충돌을 완벽 방지.
-            bool needUpdate = (!info.lastVisible ||
+            // [스마트 캐싱 & 복원 최적화]
+            // 비트맵 DWM 재전송 조건:
+            // 1) 최초 표시 (!lastVisible)
+            // 2) 위치/크기/색상/틴트모드 변경
+            // 3) 개발 VDI 전체화면에서 기본 VDI로 돌아왔을 때 (DWM 서피스 날아감 복원!)
+            bool needRender = (!info.lastVisible ||
                                info.lastX != x || info.lastY != y ||
                                info.lastW != w || info.lastH != h ||
                                info.lastColor != m_currentColor ||
-                               info.lastFullTint != isFullTint);
+                               info.lastFullTint != isFullTint ||
+                               returnedFromFullScreen);
 
-            if (needUpdate) {
+            if (needRender) {
                 RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal, isFullTint);
                 SetWindowPos(
                     info.hOverlay,
@@ -396,6 +429,16 @@ void TaskbarOverlayManager::UpdatePositions() {
                 info.lastColor = m_currentColor;
                 info.lastFullTint = isFullTint;
                 info.lastVisible = true;
+            } else if (!isFgFullScreen) {
+                // [기본 VDI 데스크톱 상태]
+                // 비트맵은 그대로 두고, Z-Order만 최상위로 살짝 보정 (0.001ms 경량 호출)
+                // 사용자가 다른 창이나 작업표시줄을 클릭해 작업표시줄이 최상위로 올라와도 오버레이가 뒤로 숨지 않도록 보장!
+                SetWindowPos(
+                    info.hOverlay,
+                    HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOREDRAW | SWP_NOACTIVATE
+                );
             }
         } else {
             if (info.lastVisible) {
