@@ -6,7 +6,6 @@
 struct OverlayWindowInfo {
     HWND hOverlay;
     HWND hTargetTray;
-    HMONITOR hMonitor;
     bool isPrimary;
 
     int lastX;
@@ -16,13 +15,11 @@ struct OverlayWindowInfo {
     COLORREF lastColor;
     bool lastFullTint;
     bool lastVisible;
-    bool lastCoveredFullScreen;
 
     OverlayWindowInfo()
-        : hOverlay(NULL), hTargetTray(NULL), hMonitor(NULL), isPrimary(false)
+        : hOverlay(NULL), hTargetTray(NULL), isPrimary(false)
         , lastX(-1), lastY(-1), lastW(-1), lastH(-1)
-        , lastColor(0), lastFullTint(false), lastVisible(false)
-        , lastCoveredFullScreen(false) {}
+        , lastColor(0), lastFullTint(false), lastVisible(false) {}
 };
 
 class TaskbarOverlayManager {
@@ -54,7 +51,6 @@ private:
     int m_disconnectedStyle; // 0: 상단 LED 바, 1: 작업표시줄 전체 틴트
 
     void SyncTrayOverlays();
-    bool IsTrayCoveredByFullScreen(HWND hTray, HMONITOR hMon);
     void RenderLayeredOverlay(HWND hOverlay, int x, int y, int w, int h, COLORREF color, bool isHorizontal, bool isFullTint);
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 };

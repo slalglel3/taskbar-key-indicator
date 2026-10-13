@@ -521,7 +521,7 @@ bool Application::Initialize(HINSTANCE hInstance) {
 
     // 1. 로거 초기화
     Logger::Init();
-    Logger::Log(L"[App] Initializing KeyIndicator v1.3.5 (Dual Monitor Clean Architecture Edition)...");
+    Logger::Log(L"[App] Initializing KeyIndicator v1.3.6 (Persistent TOPMOST Overlay Edition)...");
 
     // 2. 단일 인스턴스 중복 실행 방지
     m_hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
