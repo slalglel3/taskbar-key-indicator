@@ -7,6 +7,18 @@ struct OverlayWindowInfo {
     HWND hOverlay;
     HWND hTargetTray;
     bool isPrimary;
+    int lastX;
+    int lastY;
+    int lastW;
+    int lastH;
+    COLORREF lastColor;
+    bool lastFullTint;
+    bool lastVisible;
+
+    OverlayWindowInfo()
+        : hOverlay(NULL), hTargetTray(NULL), isPrimary(false)
+        , lastX(-1), lastY(-1), lastW(-1), lastH(-1)
+        , lastColor(0), lastFullTint(false), lastVisible(false) {}
 };
 
 class TaskbarOverlayManager {

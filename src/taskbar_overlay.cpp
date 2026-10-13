@@ -8,9 +8,9 @@ static const UINT_PTR TIMER_TEST_RESTORE = 9001;
 
 // 색상 계산 유틸리티
 static inline COLORREF Lighten(COLORREF c, float factor) {
-    BYTE r = (BYTE)std::min(255.0f, GetRValue(c) + (255 - GetRValue(c)) * factor);
-    BYTE g = (BYTE)std::min(255.0f, GetGValue(c) + (255 - GetGValue(c)) * factor);
-    BYTE b = (BYTE)std::min(255.0f, GetBValue(c) + (255 - GetBValue(c)) * factor);
+    BYTE r = (BYTE)(std::min)(255.0f, GetRValue(c) + (255 - GetRValue(c)) * factor);
+    BYTE g = (BYTE)(std::min)(255.0f, GetGValue(c) + (255 - GetGValue(c)) * factor);
+    BYTE b = (BYTE)(std::min)(255.0f, GetBValue(c) + (255 - GetBValue(c)) * factor);
     return RGB(r, g, b);
 }
 
@@ -142,13 +142,16 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
             DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED;
             DWORD style = WS_POPUP;
 
+            // [중요 수정] hWndParent를 hTray가 아닌 NULL(독립 윈도우)로 생성!
+            // hTray(Shell_TrayWnd)를 소유자로 지정할 경우, hOverlay가 Z-Order 상위로 갱신될 때
+            // 윈도우 매니저가 소유자인 로컬 작업표시줄까지 전체화면(개발 VDI) 위로 끌어올리는 심각한 버그를 원천 차단!
             HWND hOverlay = CreateWindowExW(
                 exStyle,
                 OVERLAY_CLASS_NAME,
                 L"",
                 style,
                 0, 0, 0, 0,
-                hTray, // 작업표시줄을 소유자(Owner)로 지정
+                NULL, // 소유자 분리 (No Owner Window)
                 NULL, m_hInstance, this
             );
 
@@ -158,7 +161,7 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
                 info.hTargetTray = hTray;
                 info.isPrimary = (hTray == hPrimaryTray);
                 m_overlays.push_back(info);
-                Logger::Log(L"[Overlay] Created layered overlay HWND: %p for Tray: %p", hOverlay, hTray);
+                Logger::Log(L"[Overlay] Created independent layered overlay HWND: %p for Tray: %p", hOverlay, hTray);
             } else {
                 Logger::Log(L"[Overlay] Failed to create overlay window! Error: %lu", GetLastError());
             }
@@ -190,8 +193,6 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
 
         if (isFullTint) {
             // [옵션 1: 작업표시줄 전체 틴트 덮기 모드]
-            // 상단 3px는 강렬한 네온 LED 라인으로 하이라이트하고,
-            // 작업표시줄 본체 전체는 은은한 반투명 틴트(약 21% 불투명도, 알파 55)로 물들여 시인성 극대화!
             BYTE tintAlpha = 55;
             uint32_t tintPixel = MakePremultipliedArgb(GetRValue(color), GetGValue(color), GetBValue(color), tintAlpha);
 
@@ -300,7 +301,6 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
         SIZE sizeWnd = { w, h };
         BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 
-        // UpdateLayeredWindow 호출로 DWM 하드웨어 서피스에 비트맵 직접 전송
         UpdateLayeredWindow(hOverlay, hdcScreen, &ptDst, &sizeWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
     }
 
@@ -371,15 +371,37 @@ void TaskbarOverlayManager::UpdatePositions() {
         }
 
         if (visible) {
-            RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal, isFullTint);
-            SetWindowPos(
-                info.hOverlay,
-                HWND_TOPMOST,
-                x, y, w, h,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW
-            );
+            // [스마트 캐싱 최적화]
+            // 좌표, 크기, 색상, 틴트 모드, 가시성이 동일하면 매초 불필요한 SetWindowPos 및 DWM 리드로잉 생략!
+            // 불필요한 Z-Order 재배치를 원천 차단하여 다른 전체화면 앱(VDI 등)과의 충돌을 완벽 방지.
+            bool needUpdate = (!info.lastVisible ||
+                               info.lastX != x || info.lastY != y ||
+                               info.lastW != w || info.lastH != h ||
+                               info.lastColor != m_currentColor ||
+                               info.lastFullTint != isFullTint);
+
+            if (needUpdate) {
+                RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal, isFullTint);
+                SetWindowPos(
+                    info.hOverlay,
+                    HWND_TOPMOST,
+                    x, y, w, h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW
+                );
+
+                info.lastX = x;
+                info.lastY = y;
+                info.lastW = w;
+                info.lastH = h;
+                info.lastColor = m_currentColor;
+                info.lastFullTint = isFullTint;
+                info.lastVisible = true;
+            }
         } else {
-            ShowWindow(info.hOverlay, SW_HIDE);
+            if (info.lastVisible) {
+                ShowWindow(info.hOverlay, SW_HIDE);
+                info.lastVisible = false;
+            }
         }
     }
 }
@@ -409,16 +431,20 @@ void TaskbarOverlayManager::SetState(bool keyboardConnected, COLORREF disconnect
 
 void TaskbarOverlayManager::SetThickness(int thickness) {
     m_thickness = thickness;
+    // 캐시 무효화를 위해 force update
+    for (auto& info : m_overlays) { info.lastVisible = false; }
     UpdatePositions();
 }
 
 void TaskbarOverlayManager::SetColor(COLORREF color) {
     m_currentColor = color;
+    for (auto& info : m_overlays) { info.lastVisible = false; }
     UpdatePositions();
 }
 
 void TaskbarOverlayManager::SetDisconnectedStyle(int style) {
     m_disconnectedStyle = style;
+    for (auto& info : m_overlays) { info.lastVisible = false; }
     UpdatePositions();
 }
 
@@ -426,6 +452,7 @@ void TaskbarOverlayManager::ForceShowTest(int durationMs) {
     Logger::Log(L"[Overlay] ForceShowTest initiated for %d ms (Style: %s)",
         durationMs, m_disconnectedStyle == 1 ? L"Full Tint" : L"LED Bar");
     m_isTesting = true;
+    for (auto& info : m_overlays) { info.lastVisible = false; }
     UpdatePositions();
 
     if (!m_overlays.empty() && m_overlays[0].hOverlay) {
@@ -456,6 +483,7 @@ LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wPar
             KillTimer(hwnd, TIMER_TEST_RESTORE);
             pThis->m_isTesting = false;
             Logger::Log(L"[Overlay] ForceShowTest ended. Restoring original state.");
+            for (auto& info : pThis->m_overlays) { info.lastVisible = false; }
             pThis->UpdatePositions();
             return 0;
         }
