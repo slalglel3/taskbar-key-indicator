@@ -35,7 +35,7 @@ TaskbarOverlayManager::TaskbarOverlayManager()
     , m_shouldShow(false)
     , m_isTesting(false)
     , m_thickness(3)
-    , m_disconnectedStyle(1) // 기본값 1: 작업표시줄 전체 틴트 (시인성 극대화)
+    , m_disconnectedStyle(1) // 기본값 1: 작업표시줄 전체 틴트
 {
 }
 
@@ -74,61 +74,74 @@ void TaskbarOverlayManager::Cleanup() {
     m_overlays.clear();
 }
 
-struct EnumTrayData {
-    std::vector<HWND> trayHwnds;
+// 보조 모니터 작업표시줄 열거 컨텍스트
+struct EnumTrayContext {
+    std::vector<HWND> secondaryTrays;
 };
 
-static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
-    wchar_t className[256];
-    if (GetClassNameW(hwnd, className, 256)) {
-        if (wcscmp(className, L"Shell_SecondaryTrayWnd") == 0) {
-            auto* data = (EnumTrayData*)lParam;
-            data->trayHwnds.push_back(hwnd);
+static BOOL CALLBACK EnumSecondaryTraysProc(HWND hwnd, LPARAM lParam) {
+    if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) return TRUE;
+
+    wchar_t cls[64] = { 0 };
+    if (GetClassNameW(hwnd, cls, 64)) {
+        if (wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0) {
+            RECT rc;
+            if (GetWindowRect(hwnd, &rc)) {
+                if (rc.right > rc.left && rc.bottom > rc.top) {
+                    auto* ctx = (EnumTrayContext*)lParam;
+                    ctx->secondaryTrays.push_back(hwnd);
+                }
+            }
         }
     }
     return TRUE;
 }
 
-void TaskbarOverlayManager::CreateOrUpdateOverlays() {
-    std::vector<HWND> allTrays;
+// [동적 자가 치유 트레이 동기화]
+// 다중 모니터 변경, VDI 해상도 전환, 작업표시줄 재생성 시 100% 능동 감지 및 복구
+void TaskbarOverlayManager::SyncTrayOverlays() {
+    std::vector<HWND> activeTrays;
 
     // 주 작업표시줄
     HWND hPrimaryTray = FindWindowW(L"Shell_TrayWnd", NULL);
-    if (hPrimaryTray) {
-        allTrays.push_back(hPrimaryTray);
-    } else {
-        Logger::Log(L"[Overlay] Shell_TrayWnd not found!");
+    if (hPrimaryTray && IsWindow(hPrimaryTray) && IsWindowVisible(hPrimaryTray)) {
+        RECT rc;
+        if (GetWindowRect(hPrimaryTray, &rc) && (rc.right > rc.left && rc.bottom > rc.top)) {
+            activeTrays.push_back(hPrimaryTray);
+        }
     }
 
-    // 보조 모니터 작업표시줄 열거
-    EnumTrayData data;
-    EnumWindows(EnumWindowsProc, (LPARAM)&data);
-    for (HWND hSec : data.trayHwnds) {
-        allTrays.push_back(hSec);
+    // 보조 작업표시줄들
+    EnumTrayContext ctx;
+    EnumWindows(EnumSecondaryTraysProc, (LPARAM)&ctx);
+    for (HWND hSec : ctx.secondaryTrays) {
+        activeTrays.push_back(hSec);
     }
 
-    // 기존 오버레이 중 유효하지 않은 것 정리
-    std::vector<OverlayWindowInfo> validOverlays;
+    // 1. 유효하지 않은 트레이의 오버레이 창 정리
+    std::vector<OverlayWindowInfo> retained;
     for (auto& info : m_overlays) {
-        bool found = false;
-        for (HWND hTray : allTrays) {
+        bool stillActive = false;
+        for (HWND hTray : activeTrays) {
             if (info.hTargetTray == hTray) {
-                found = true;
+                stillActive = true;
                 break;
             }
         }
-        if (found && IsWindow(info.hOverlay)) {
-            validOverlays.push_back(info);
+        if (stillActive && info.hOverlay && IsWindow(info.hOverlay)) {
+            info.hMonitor = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
+            retained.push_back(info);
         } else {
             if (info.hOverlay && IsWindow(info.hOverlay)) {
+                Logger::Log(L"[Overlay] Destroying obsolete overlay HWND %p (Tray was %p)", info.hOverlay, info.hTargetTray);
                 DestroyWindow(info.hOverlay);
             }
         }
     }
-    m_overlays = validOverlays;
+    m_overlays = retained;
 
-    // 신규 트레이에 대한 오버레이 생성
-    for (HWND hTray : allTrays) {
+    // 2. 신규 트레이에 대한 오버레이 창 생성
+    for (HWND hTray : activeTrays) {
         bool exists = false;
         for (auto& info : m_overlays) {
             if (info.hTargetTray == hTray) {
@@ -137,21 +150,18 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
             }
         }
         if (!exists) {
-            // [핵심] WS_EX_LAYERED + WS_EX_TRANSPARENT + WS_EX_TOPMOST
-            // DWM 독립 컴포지션 서피스를 사용하여 작업표시줄 클릭 시에도 100% 완전 투과
+            // [소유자 분리 + 완전 투과]
+            // hWndParent=NULL로 생성하여 작업표시줄이 VDI 전체화면 위로 딸려 올라가는 Z-Order 결함을 원천 차단
             DWORD exStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED;
             DWORD style = WS_POPUP;
 
-            // [중요 수정] hWndParent를 hTray가 아닌 NULL(독립 윈도우)로 생성!
-            // hTray(Shell_TrayWnd)를 소유자로 지정할 경우, hOverlay가 Z-Order 상위로 갱신될 때
-            // 윈도우 매니저가 소유자인 로컬 작업표시줄까지 전체화면(개발 VDI) 위로 끌어올리는 심각한 버그를 원천 차단!
             HWND hOverlay = CreateWindowExW(
                 exStyle,
                 OVERLAY_CLASS_NAME,
                 L"",
                 style,
                 0, 0, 0, 0,
-                NULL, // 소유자 분리 (No Owner Window)
+                NULL,
                 NULL, m_hInstance, this
             );
 
@@ -159,16 +169,50 @@ void TaskbarOverlayManager::CreateOrUpdateOverlays() {
                 OverlayWindowInfo info;
                 info.hOverlay = hOverlay;
                 info.hTargetTray = hTray;
+                info.hMonitor = MonitorFromWindow(hTray, MONITOR_DEFAULTTONEAREST);
                 info.isPrimary = (hTray == hPrimaryTray);
                 m_overlays.push_back(info);
-                Logger::Log(L"[Overlay] Created independent layered overlay HWND: %p for Tray: %p", hOverlay, hTray);
+                Logger::Log(L"[Overlay] Created independent overlay HWND: %p for %s Tray: %p (Mon: %p)",
+                    hOverlay, info.isPrimary ? L"Primary" : L"Secondary", hTray, info.hMonitor);
             } else {
-                Logger::Log(L"[Overlay] Failed to create overlay window! Error: %lu", GetLastError());
+                Logger::Log(L"[Overlay] Failed to create overlay HWND! Error: %lu", GetLastError());
             }
         }
     }
+}
 
-    UpdatePositions();
+// [모니터별 독립 전체화면 감지]
+// 특정 트레이가 위치한 모니터에 한해서만 전체화면 앱(개발 VDI 전체화면 등)이 덮고 있는지 판별
+bool TaskbarOverlayManager::IsTrayCoveredByFullScreen(HWND hTray, HMONITOR hMon) {
+    if (!hMon) return false;
+
+    HWND hFg = GetForegroundWindow();
+    if (!hFg || hFg == GetDesktopWindow() || hFg == GetShellWindow()) return false;
+
+    // 전경 창이 작업표시줄 자체라면 전체화면 상태가 아님
+    wchar_t cls[64] = { 0 };
+    if (GetClassNameW(hFg, cls, 64)) {
+        if (wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0) {
+            return false;
+        }
+    }
+
+    // 전경 창이 속한 모니터 확인
+    HMONITOR hFgMon = MonitorFromWindow(hFg, MONITOR_DEFAULTTONEAREST);
+    if (!hFgMon || hFgMon != hMon) {
+        // [모니터 격리 핵심]: 전경 창이 다른 모니터에 있다면, 이 트레이가 있는 모니터는 전체화면에 덮여있지 않음!
+        return false;
+    }
+
+    RECT rcWnd;
+    if (!GetWindowRect(hFg, &rcWnd)) return false;
+
+    MONITORINFO mi = { sizeof(MONITORINFO) };
+    if (!GetMonitorInfoW(hMon, &mi)) return false;
+
+    // 전경 창이 해당 모니터 전체 영역을 완전히 덮고 있는가?
+    return (rcWnd.left <= mi.rcMonitor.left && rcWnd.top <= mi.rcMonitor.top &&
+            rcWnd.right >= mi.rcMonitor.right && rcWnd.bottom >= mi.rcMonitor.bottom);
 }
 
 void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, int w, int h, COLORREF color, bool isHorizontal, bool isFullTint) {
@@ -177,7 +221,7 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
     BITMAPINFO bi = { 0 };
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h; // Top-down
+    bi.bmiHeader.biHeight = -h; // Top-down DIB
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
@@ -192,7 +236,7 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
         uint32_t* pixels = (uint32_t*)pBits;
 
         if (isFullTint) {
-            // [옵션 1: 작업표시줄 전체 틴트 덮기 모드]
+            // [작업표시줄 전체 틴트 덮기 모드]
             BYTE tintAlpha = 55;
             uint32_t tintPixel = MakePremultipliedArgb(GetRValue(color), GetGValue(color), GetBValue(color), tintAlpha);
 
@@ -233,7 +277,7 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
                 }
             }
         } else {
-            // [옵션 2: 상단 네온 LED 바 전용 모드]
+            // [상단 네온 LED 바 전용 모드]
             if (isHorizontal) {
                 for (int row = 0; row < h; ++row) {
                     COLORREF lineCol;
@@ -301,7 +345,11 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
         SIZE sizeWnd = { w, h };
         BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 
-        UpdateLayeredWindow(hOverlay, hdcScreen, &ptDst, &sizeWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
+        BOOL ulwRet = UpdateLayeredWindow(hOverlay, hdcScreen, &ptDst, &sizeWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
+        if (!ulwRet) {
+            Logger::Log(L"[Overlay] UpdateLayeredWindow failed for HWND %p at (%d,%d %dx%d). Error: %lu",
+                hOverlay, x, y, w, h, GetLastError());
+        }
     }
 
     SelectObject(hdcMem, hOldBmp);
@@ -310,102 +358,71 @@ void TaskbarOverlayManager::RenderLayeredOverlay(HWND hOverlay, int x, int y, in
     ReleaseDC(NULL, hdcScreen);
 }
 
-// 화면 전면에 다른 앱(개발 VDI 전체화면 등)이 모니터를 덮고 있는지 감지
-static bool IsForegroundFullScreen() {
-    HWND hFg = GetForegroundWindow();
-    if (!hFg || hFg == GetDesktopWindow() || hFg == GetShellWindow()) return false;
-
-    wchar_t cls[64] = { 0 };
-    if (GetClassNameW(hFg, cls, 64)) {
-        if (wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0) {
-            return false;
-        }
-    }
-
-    RECT rcWnd;
-    if (!GetWindowRect(hFg, &rcWnd)) return false;
-
-    HMONITOR hMon = MonitorFromWindow(hFg, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = { sizeof(MONITORINFO) };
-    if (!GetMonitorInfoW(hMon, &mi)) return false;
-
-    // 포그라운드 창이 해당 모니터 전체 영역을 덮고 있는가?
-    return (rcWnd.left <= mi.rcMonitor.left && rcWnd.top <= mi.rcMonitor.top &&
-            rcWnd.right >= mi.rcMonitor.right && rcWnd.bottom >= mi.rcMonitor.bottom);
-}
-
 void TaskbarOverlayManager::UpdatePositions() {
-    bool visible = m_shouldShow || m_isTesting;
+    // 1. 매 주기마다 동적 트레이 라이프사이클 동기화 (자가 치유)
+    SyncTrayOverlays();
 
-    // 녹색(PC 유선)일 때는 항상 상단 LED 바 모드,
-    // 붉은색(모바일 전환 또는 테스트)일 때만 사용자가 선택한 스타일(틴트 vs LED 바) 적용
+    bool shouldBeVisible = m_shouldShow || m_isTesting;
     bool isFullTint = (!m_keyboardConnected || m_isTesting) && (m_disconnectedStyle == 1);
-    bool isFgFullScreen = IsForegroundFullScreen();
-
-    // 전체화면(개발 VDI)에서 기본 VDI로 복귀하는 순간 감지 (DWM 오클루전 서피스 즉시 복원용)
-    static bool s_lastFgFullScreen = false;
-    bool returnedFromFullScreen = (s_lastFgFullScreen && !isFgFullScreen);
-    s_lastFgFullScreen = isFgFullScreen;
 
     for (auto& info : m_overlays) {
-        if (!info.hTargetTray || !IsWindow(info.hTargetTray)) continue;
+        if (!info.hTargetTray || !IsWindow(info.hTargetTray) || !info.hOverlay || !IsWindow(info.hOverlay)) {
+            continue;
+        }
 
         RECT rcTray;
         if (!GetWindowRect(info.hTargetTray, &rcTray)) {
-            Logger::Log(L"[Overlay] Failed to GetWindowRect for Tray %p", info.hTargetTray);
             continue;
         }
 
         int trayWidth = rcTray.right - rcTray.left;
         int trayHeight = rcTray.bottom - rcTray.top;
+        if (trayWidth <= 0 || trayHeight <= 0) continue;
 
-        int x = rcTray.left;
-        int y = rcTray.top;
-        int w = trayWidth;
-        int h = trayHeight;
-        bool isHorizontal = (trayWidth >= trayHeight);
+        info.hMonitor = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
 
-        if (isFullTint) {
-            // [전체 틴트 모드]: 작업표시줄 전체 사각형 덮기
-            x = rcTray.left;
-            y = rcTray.top;
-            w = trayWidth;
-            h = trayHeight;
-        } else {
-            // [LED 바 모드]: m_thickness 픽셀 두께의 테두리 바
-            if (isHorizontal) {
-                HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
+        // 해당 모니터에 대한 독립 전체화면 감지
+        bool isCoveredByFullScreen = IsTrayCoveredByFullScreen(info.hTargetTray, info.hMonitor);
+
+        // 해당 모니터에서 전체화면 앱이 해제되는 순간 감지 (DWM 서피스 즉각 강제 재전송)
+        bool returnedFromFullScreen = (info.lastCoveredFullScreen && !isCoveredByFullScreen);
+        info.lastCoveredFullScreen = isCoveredByFullScreen;
+
+        // 이 오버레이 창이 실제로 화면에 보여야 하는 조건
+        bool overlayVisible = shouldBeVisible && !isCoveredByFullScreen;
+
+        if (overlayVisible) {
+            int x = rcTray.left;
+            int y = rcTray.top;
+            int w = trayWidth;
+            int h = trayHeight;
+            bool isHorizontal = (trayWidth >= trayHeight);
+
+            if (!isFullTint) {
+                // 상단/측면 LED 바 모드
                 MONITORINFO mi = { sizeof(MONITORINFO) };
-                GetMonitorInfoW(hMon, &mi);
+                GetMonitorInfoW(info.hMonitor, &mi);
 
-                if (rcTray.top <= mi.rcMonitor.top + 10) {
-                    y = rcTray.bottom - m_thickness;
+                if (isHorizontal) {
+                    if (rcTray.top <= mi.rcMonitor.top + 10) {
+                        y = rcTray.bottom - m_thickness;
+                    } else {
+                        y = rcTray.top;
+                    }
+                    w = trayWidth;
+                    h = m_thickness;
                 } else {
-                    y = rcTray.top;
+                    if (rcTray.left <= mi.rcMonitor.left + 10) {
+                        x = rcTray.right - m_thickness;
+                    } else {
+                        x = rcTray.left;
+                    }
+                    w = m_thickness;
+                    h = trayHeight;
                 }
-                w = trayWidth;
-                h = m_thickness;
-            } else {
-                HMONITOR hMon = MonitorFromWindow(info.hTargetTray, MONITOR_DEFAULTTONEAREST);
-                MONITORINFO mi = { sizeof(MONITORINFO) };
-                GetMonitorInfoW(hMon, &mi);
-
-                if (rcTray.left <= mi.rcMonitor.left + 10) {
-                    x = rcTray.right - m_thickness;
-                } else {
-                    x = rcTray.left;
-                }
-                w = m_thickness;
-                h = trayHeight;
             }
-        }
 
-        if (visible) {
-            // [스마트 캐싱 & 복원 최적화]
-            // 비트맵 DWM 재전송 조건:
-            // 1) 최초 표시 (!lastVisible)
-            // 2) 위치/크기/색상/틴트모드 변경
-            // 3) 개발 VDI 전체화면에서 기본 VDI로 돌아왔을 때 (DWM 서피스 날아감 복원!)
+            // DWM 서피스 재전송 필요 여부 판단
             bool needRender = (!info.lastVisible ||
                                info.lastX != x || info.lastY != y ||
                                info.lastW != w || info.lastH != h ||
@@ -415,11 +432,13 @@ void TaskbarOverlayManager::UpdatePositions() {
 
             if (needRender) {
                 RenderLayeredOverlay(info.hOverlay, x, y, w, h, m_currentColor, isHorizontal, isFullTint);
+
+                // Z-Order 최상위 보정 (UpdateLayeredWindow로 위치/크기는 이미 설정됨)
                 SetWindowPos(
                     info.hOverlay,
                     HWND_TOPMOST,
-                    x, y, w, h,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
                 );
 
                 info.lastX = x;
@@ -429,15 +448,15 @@ void TaskbarOverlayManager::UpdatePositions() {
                 info.lastColor = m_currentColor;
                 info.lastFullTint = isFullTint;
                 info.lastVisible = true;
-            } else if (!isFgFullScreen) {
-                // [기본 VDI 데스크톱 상태]
-                // 비트맵은 그대로 두고, Z-Order만 최상위로 살짝 보정 (0.001ms 경량 호출)
-                // 사용자가 다른 창이나 작업표시줄을 클릭해 작업표시줄이 최상위로 올라와도 오버레이가 뒤로 숨지 않도록 보장!
+            } else {
+                // 서피스가 이미 유효한 상태:
+                // 사용자가 작업표시줄이나 다른 창을 클릭해 작업표시줄이 최상위로 올라와도
+                // 오버레이가 뒤로 숨지 않도록 Z-Order만 가볍게 보정
                 SetWindowPos(
                     info.hOverlay,
                     HWND_TOPMOST,
                     0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOREDRAW | SWP_NOACTIVATE
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOREDRAW | SWP_NOACTIVATE | SWP_SHOWWINDOW
                 );
             }
         } else {
@@ -469,12 +488,11 @@ void TaskbarOverlayManager::SetState(bool keyboardConnected, COLORREF disconnect
         m_thickness,
         m_disconnectedStyle == 1 ? L"Full Tint" : L"LED Bar");
 
-    CreateOrUpdateOverlays();
+    UpdatePositions();
 }
 
 void TaskbarOverlayManager::SetThickness(int thickness) {
     m_thickness = thickness;
-    // 캐시 무효화를 위해 force update
     for (auto& info : m_overlays) { info.lastVisible = false; }
     UpdatePositions();
 }
@@ -516,7 +534,7 @@ LRESULT CALLBACK TaskbarOverlayManager::WndProc(HWND hwnd, UINT msg, WPARAM wPar
 
     switch (msg) {
     case WM_QUERYENDSESSION:
-        return TRUE; // OS 시스템 종료 승인
+        return TRUE;
 
     case WM_ENDSESSION:
         return 0;
